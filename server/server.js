@@ -57,7 +57,7 @@ app.post('/api/process-batch', async (req, res) => {
         
         // Determine AI model to use
         const isTurbo = processingMode === '8b';
-        const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.1-70b-instruct";
+        const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
         console.log(`Using AI Model: ${modelName} (Turbo: ${isTurbo})`);
 
         // 2. Download and Parse Excel
