@@ -10,6 +10,8 @@ export default function ClientDashboard() {
   const [stats, setStats] = useState({ matched: 0, flagged: 0, processing: 0 });
   const [loading, setLoading] = useState(true);
 
+  const [modal, setModal] = useState({ isOpen: false, type: 'alert', title: '', message: '', onConfirm: null });
+
   useEffect(() => {
     const fetchProfile = async () => {
       if (session?.user?.id) {
@@ -40,7 +42,7 @@ export default function ClientDashboard() {
 
     if (batchError) {
       console.error("Batch Error:", batchError);
-      alert("Error fetching batches: " + batchError.message);
+      setModal({ isOpen: true, type: 'alert', title: 'Error Fetching Batches', message: batchError.message });
     }
     
     if (batchData) setBatches(batchData);
@@ -52,7 +54,7 @@ export default function ClientDashboard() {
       
     if (resultsError) {
       console.error("Results Error:", resultsError);
-      alert("Error fetching results: " + resultsError.message);
+      setModal({ isOpen: true, type: 'alert', title: 'Error Fetching Results', message: resultsError.message });
     }
       
     if (batchData && resultsData) {
@@ -88,7 +90,7 @@ export default function ClientDashboard() {
       .eq('batch_id', batchId);
       
     if (!data || data.length === 0) {
-      alert("No results found for this batch.");
+      setModal({ isOpen: true, type: 'alert', title: 'No Results Found', message: "No results found for this batch." });
       return;
     }
 
@@ -120,26 +122,32 @@ export default function ClientDashboard() {
     URL.revokeObjectURL(url);
   };
 
-  const deleteBatch = async (batchId) => {
-    if (!window.confirm("Are you sure you want to delete this batch and all its results? This action cannot be undone.")) return;
-    
-    try {
-      const { error } = await supabase
-        .from('batches')
-        .delete()
-        .eq('id', batchId);
-        
-      if (error) throw error;
-      
-      // Update state locally
-      setBatches(prev => prev.filter(b => b.id !== batchId));
-      
-      // Re-fetch data to update stats
-      fetchData();
-    } catch (error) {
-      console.error("Delete Error:", error);
-      alert("Failed to delete batch: " + error.message);
-    }
+  const deleteBatch = (batchId) => {
+    setModal({
+      isOpen: true,
+      type: 'confirm',
+      title: 'Confirm Deletion',
+      message: 'Are you sure you want to delete this batch and all its results? This action cannot be undone.',
+      onConfirm: async () => {
+        try {
+          const { error } = await supabase
+            .from('batches')
+            .delete()
+            .eq('id', batchId);
+            
+          if (error) throw error;
+          
+          // Update state locally
+          setBatches(prev => prev.filter(b => b.id !== batchId));
+          
+          // Re-fetch data to update stats
+          fetchData();
+        } catch (error) {
+          console.error("Delete Error:", error);
+          setModal({ isOpen: true, type: 'alert', title: 'Delete Failed', message: "Failed to delete batch: " + error.message });
+        }
+      }
+    });
   };
 
   return (
@@ -243,6 +251,65 @@ export default function ClientDashboard() {
           )}
         </div>
       </div>
+
+      {/* CUSTOM APP MODAL DIALOG */}
+      {modal.isOpen && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 9999
+        }}>
+          <div className="card glass-panel" style={{
+            maxWidth: '450px',
+            width: '90%',
+            padding: '2rem',
+            border: '1px solid var(--border-color)',
+            boxShadow: '0 20px 40px rgba(0, 0, 0, 0.5)',
+            textAlign: 'center'
+          }}>
+            <h3 style={{ marginTop: 0, marginBottom: '1rem', color: modal.type === 'confirm' ? 'var(--danger-color)' : 'var(--primary-color)', fontSize: '1.25rem' }}>
+              {modal.title}
+            </h3>
+            <p className="text-muted" style={{ marginBottom: '2rem', lineHeight: 1.6, fontSize: '0.95rem' }}>
+              {modal.message}
+            </p>
+            <div className="flex justify-center gap-4">
+              {modal.type === 'confirm' && (
+                <button 
+                  className="btn btn-outline text-muted" 
+                  onClick={() => setModal({ ...modal, isOpen: false })}
+                  style={{ padding: '0.75rem 1.5rem', minWidth: '100px' }}
+                >
+                  Cancel
+                </button>
+              )}
+              <button 
+                className="btn btn-primary" 
+                onClick={() => {
+                  if (modal.onConfirm) modal.onConfirm();
+                  setModal({ ...modal, isOpen: false });
+                }}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  minWidth: '100px',
+                  backgroundColor: modal.type === 'confirm' ? 'var(--danger-color)' : 'var(--primary-color)',
+                  borderColor: modal.type === 'confirm' ? 'var(--danger-color)' : 'var(--primary-color)'
+                }}
+              >
+                {modal.type === 'confirm' ? 'Delete' : 'OK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

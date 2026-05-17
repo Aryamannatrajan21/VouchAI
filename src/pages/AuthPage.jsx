@@ -12,6 +12,7 @@ export default function AuthPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   
   const navigate = useNavigate();
 
@@ -19,6 +20,7 @@ export default function AuthPage() {
     e.preventDefault();
     setLoading(true);
     setErrorMsg('');
+    setSuccessMsg('');
 
     try {
       if (isLogin) {
@@ -44,7 +46,7 @@ export default function AuthPage() {
         if (data.session) {
            navigate('/user/dashboard');
         } else {
-           alert('Account created successfully! Check your email for the confirmation link if required, otherwise you can sign in.');
+           setSuccessMsg('Account created successfully! Check your email for the confirmation link if required, otherwise you can sign in.');
            setIsLogin(true);
         }
       }
@@ -67,6 +69,12 @@ export default function AuthPage() {
         {errorMsg && (
           <div style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger-color)', padding: '0.75rem', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.875rem' }}>
             {errorMsg}
+          </div>
+        )}
+
+        {successMsg && (
+          <div style={{ backgroundColor: 'rgba(16, 185, 129, 0.1)', color: 'var(--success-color)', padding: '0.75rem', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.875rem' }}>
+            {successMsg}
           </div>
         )}
 
