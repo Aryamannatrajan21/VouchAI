@@ -30,7 +30,7 @@ export default function AuthPage() {
         if (password !== confirmPassword) {
           throw new Error("Passwords do not match");
         }
-        const { error } = await supabase.auth.signUp({ 
+        const { data, error } = await supabase.auth.signUp({ 
           email, 
           password,
           options: {
@@ -40,8 +40,13 @@ export default function AuthPage() {
           }
         });
         if (error) throw error;
-        alert('Account created successfully! Check your email for the confirmation link if required, otherwise you can sign in.');
-        setIsLogin(true);
+        
+        if (data.session) {
+           navigate('/user/dashboard');
+        } else {
+           alert('Account created successfully! Check your email for the confirmation link if required, otherwise you can sign in.');
+           setIsLogin(true);
+        }
       }
     } catch (error) {
       setErrorMsg(error.message);

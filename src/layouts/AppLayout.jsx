@@ -1,8 +1,30 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
+import { supabase } from '../lib/supabase';
 
 export default function AppLayout() {
+  const [profileName, setProfileName] = useState('');
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user?.id) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('name')
+          .eq('id', session.user.id)
+          .single();
+        if (data && data.name) {
+          setProfileName(data.name);
+        } else {
+          setProfileName(session.user.user_metadata?.full_name || 'User');
+        }
+      }
+    };
+    fetchProfile();
+  }, []);
+
   return (
     <div className="app-container">
       <Sidebar />
@@ -10,7 +32,7 @@ export default function AppLayout() {
         <div className="top-nav glass-panel">
           <div className="user-profile">
             <div className="avatar"></div>
-            <span>John Doe</span>
+            <span>{profileName || 'User'}</span>
           </div>
         </div>
         <div className="content-scroll">

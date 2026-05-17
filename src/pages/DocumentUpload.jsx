@@ -47,8 +47,6 @@ export default function DocumentUpload() {
         
       if (excelError) throw excelError;
 
-      // TODO: Create batch record in DB here
-
       // Upload Support Files
       for (const file of supportFiles) {
         const supportPath = `${clientId}/${timestamp}_${file.name}`;
@@ -59,7 +57,24 @@ export default function DocumentUpload() {
         if (supportError) console.error("Error uploading support file:", supportError);
       }
 
-      setMessage('Success! Files have been uploaded securely.');
+      // Call Node.js Backend to start processing
+      const supportPaths = supportFiles.map(f => `${clientId}/${timestamp}_${f.name}`);
+      
+      const response = await fetch('http://localhost:3000/api/process-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId,
+          excelPath,
+          supportPaths
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to trigger AI processing');
+      }
+
+      setMessage('Success! Files securely uploaded and AI processing has started.');
       setExcelFile(null);
       setSupportFiles([]);
     } catch (error) {
@@ -89,24 +104,24 @@ export default function DocumentUpload() {
           <div style={{ position: 'relative', border: '2px dashed var(--border-color)', borderRadius: '12px', padding: '3rem 2rem', textAlign: 'center', cursor: 'pointer', backgroundColor: 'rgba(255, 255, 255, 0.02)' }}>
             <input 
               type="file" 
-              accept=".xlsx,.xls,.csv" 
+              accept=".xlsx,.xls,.xlsm,.xlsb,.csv" 
               onChange={handleExcelChange} 
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }}
             />
             <UploadCloud size={48} color="var(--primary-color)" style={{ margin: '0 auto 1rem auto' }} />
-            <h4 style={{ marginBottom: '0.5rem' }}>Click or drag .xlsx file here</h4>
+            <h4 style={{ marginBottom: '0.5rem' }}>Click or drag Excel file here</h4>
             <p className="text-muted" style={{ fontSize: '0.875rem' }}>Maximum file size 50MB</p>
           </div>
         </div>
 
         {/* SUPPORT FILES UPLOAD */}
         <div className="card">
-          <h3 style={{ marginBottom: '1rem' }}>Supporting Documents (PDF, Images)</h3>
+          <h3 style={{ marginBottom: '1rem' }}>Supporting Documents (PDF, Images, Excel)</h3>
           <div style={{ position: 'relative', border: '2px dashed var(--border-color)', borderRadius: '12px', padding: '3rem 2rem', textAlign: 'center', cursor: 'pointer', backgroundColor: 'rgba(255, 255, 255, 0.02)' }}>
             <input 
               type="file" 
               multiple 
-              accept=".pdf,image/*" 
+              accept=".pdf,image/*,.xlsx,.xls,.xlsm,.xlsb,.csv" 
               onChange={handleSupportChange} 
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }}
             />
@@ -115,7 +130,7 @@ export default function DocumentUpload() {
               <ImageIcon size={32} color="var(--primary-color)" />
             </div>
             <h4 style={{ marginBottom: '0.5rem' }}>Click or drag multiple files here</h4>
-            <p className="text-muted" style={{ fontSize: '0.875rem' }}>Upload invoices, receipts, and proofs</p>
+            <p className="text-muted" style={{ fontSize: '0.875rem' }}>Upload invoices, receipts, spreadsheets, and proofs</p>
           </div>
         </div>
       </div>
