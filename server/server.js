@@ -119,14 +119,19 @@ Format per object:
         });
 
         let aiResultText = completion.choices[0].message.content.trim();
-        // Strip markdown code blocks if any
-        if (aiResultText.startsWith('```json')) aiResultText = aiResultText.replace(/```json/g, '').replace(/```/g, '').trim();
-        if (aiResultText.startsWith('```')) aiResultText = aiResultText.replace(/```/g, '').trim();
-        
         console.log(`AI Raw Output:`, aiResultText);
         let aiResults = [];
         try {
-          aiResults = JSON.parse(aiResultText);
+          // Robustly extract JSON Array from text to ignore conversational prefixes/suffixes
+          const start = aiResultText.indexOf('[');
+          const end = aiResultText.lastIndexOf(']');
+          if (start !== -1 && end !== -1 && end > start) {
+            const jsonStr = aiResultText.substring(start, end + 1);
+            aiResults = JSON.parse(jsonStr);
+          } else {
+            // Fallback to parsing direct JSON
+            aiResults = JSON.parse(aiResultText);
+          }
           if (!Array.isArray(aiResults)) aiResults = [aiResults];
         } catch (e) {
           console.error("Failed to parse AI JSON:", aiResultText);
@@ -150,7 +155,11 @@ Format per object:
         console.log(`Batch ${dbBatchId} completed successfully!`);
       } catch (err) {
         console.error(`Error processing batch ${dbBatchId}:`, err);
-        await supabase.from('batches').update({ status: 'failed' }).eq('id', dbBatchId).catch(() => {});
+        try {
+          await supabase.from('batches').update({ status: 'failed' }).eq('id', dbBatchId);
+        } catch (dbErr) {
+          console.error("Failed to update status to failed:", dbErr);
+        }
       }
     }, 0);
     
