@@ -23,10 +23,20 @@ const openai = new OpenAI({
   baseURL: 'https://integrate.api.nvidia.com/v1',
 });
 
+// Helper: convert an array of objects into a clean markdown table string
+function toMarkdownTable(rows) {
+  if (!rows || rows.length === 0) return '(empty)';
+  const headers = Object.keys(rows[0]);
+  const divider = headers.map(h => '-'.repeat(Math.max(h.length, 6))).join(' | ');
+  const headerRow = headers.join(' | ');
+  const dataRows = rows.map(r => headers.map(h => String(r[h] ?? '')).join(' | '));
+  return [headerRow, divider, ...dataRows].join('\n');
+}
+
 // Endpoint to process a batch
 app.post('/api/process-batch', async (req, res) => {
   try {
-    const { excelPath, supportPaths, clientId, processingMode } = req.body;
+    const { excelPath, supportPaths, clientId, processingMode, columnMapping } = req.body;
     
     if (!excelPath || !clientId) {
       return res.status(400).json({ error: 'Missing required parameters' });
@@ -60,62 +70,98 @@ app.post('/api/process-batch', async (req, res) => {
         const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
         console.log(`Using AI Model: ${modelName} (Turbo: ${isTurbo})`);
 
-        // 2. Download and Parse Excel
+        // 2. Download and Parse Excel Dump
         const { data: excelBlob, error: downloadError } = await supabase.storage.from('uploads').download(excelPath);
         if (downloadError) throw downloadError;
-        
+
         const arrayBuffer = await excelBlob.arrayBuffer();
         const xlsx = require('xlsx');
         const workbook = xlsx.read(arrayBuffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
-        const transactions = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-        console.log(`Extracted ${transactions.length} transactions from Excel dump.`);
-        
-        if (transactions.length === 0) {
+        const allRows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        console.log(`Extracted ${allRows.length} rows from Excel dump.`);
+
+        if (allRows.length === 0) {
           throw new Error('No transactions found in the Excel dump. Please check the file format.');
         }
 
-        // 3. Download and Parse Support Docs (Mocking PDF/Image extraction for simplicity, using text from Excel if provided)
-        let supportText = '';
+        // Use column mapping to build structured transaction objects
+        const txnIdCol = columnMapping?.txnId;
+        const vendorCol = columnMapping?.vendor;
+        const amountCol = columnMapping?.amount;
+
+        const transactions = allRows.slice(0, 25).map((row, idx) => ({
+          txn_id: String(row[txnIdCol] ?? idx + 1),
+          vendor: String(row[vendorCol] ?? 'Unknown'),
+          amount: Number(row[amountCol]) || 0,
+          raw: row  // keep all columns for context
+        }));
+        console.log(`Structured ${transactions.length} transactions using mapping: ID=${txnIdCol}, Vendor=${vendorCol}, Amount=${amountCol}`);
+
+        // 3. Download and Parse Support Docs — format as readable markdown tables
+        let supportSections = [];
         for (const path of supportPaths) {
-           const { data: supportBlob } = await supabase.storage.from('uploads').download(path);
-           if (supportBlob) {
-             if (path.endsWith('.xlsx') || path.endsWith('.csv') || path.endsWith('.xls') || path.endsWith('.xlsm') || path.endsWith('.xlsb')) {
-               const buf = await supportBlob.arrayBuffer();
-               const wb = xlsx.read(buf, { type: 'buffer' });
-               supportText += JSON.stringify(xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])) + '\n';
-             } else {
-               // If PDF, we'd use pdf-parse here. For prototype, we just note it.
-               supportText += `[Content of document ${path} would be parsed here]\n`;
-             }
-           }
+          const { data: supportBlob } = await supabase.storage.from('uploads').download(path);
+          if (!supportBlob) continue;
+          const fileName = path.split('/').pop();
+          const ext = path.split('.').pop().toLowerCase();
+          if (['xlsx','csv','xls','xlsm','xlsb'].includes(ext)) {
+            const buf = await supportBlob.arrayBuffer();
+            const wb = xlsx.read(buf, { type: 'buffer' });
+            // Parse ALL sheets
+            for (const sName of wb.SheetNames) {
+              const rows = xlsx.utils.sheet_to_json(wb.Sheets[sName]);
+              if (rows.length > 0) {
+                supportSections.push(`--- File: ${fileName} | Sheet: ${sName} ---\n${toMarkdownTable(rows.slice(0, 50))}`);
+              }
+            }
+          } else {
+            supportSections.push(`--- File: ${fileName} ---\n[Non-spreadsheet file — manual review required]`);
+          }
         }
-        
-        console.log(`Extracted support documents text. Length: ${supportText.length} chars.`);
 
-        // 4. Call Nvidia API
-        const prompt = `
-You are an expert AI Auditor. Your job is to reconcile the transactions provided in the "Transactions JSON" against the "Support Documents Data".
+        const supportText = supportSections.length > 0
+          ? supportSections.join('\n\n')
+          : 'No supporting documents provided.';
 
-Transactions JSON:
-${JSON.stringify(transactions.slice(0, 10))} // Limiting to 10 for prototype
+        console.log(`Support document text length: ${supportText.length} chars.`);
 
-Support Documents Data:
+        // 4. Build structured, explicit prompt
+        const txnTable = transactions.map(t =>
+          `- txn_id: "${t.txn_id}" | vendor: "${t.vendor}" | amount: ${t.amount}`
+        ).join('\n');
+
+        const prompt = `You are an expert financial auditor AI. Your task is to match each transaction from the TRANSACTION DUMP against the SUPPORTING DOCUMENTS to verify if each transaction is correct.
+
+COLUMN MAPPING (how the transaction dump is structured):
+- Transaction ID is in column: "${txnIdCol}"
+- Vendor / Party name is in column: "${vendorCol}"
+- Amount is in column: "${amountCol}"
+
+TRANSACTION DUMP (${transactions.length} transactions):
+${txnTable}
+
+SUPPORTING DOCUMENTS:
 ${supportText}
 
 INSTRUCTIONS:
-1. You MUST return exactly one JSON object for EVERY transaction in the Transactions JSON.
-2. If you cannot find the supporting document, set status to 'flagged' and explain why in 'auditor_notes'.
-3. Output a strictly formatted JSON array of objects. Do NOT wrap in markdown.
-Format per object:
-{ "txn_id": "string", "vendor": "string", "amount_dump": number, "amount_doc": number, "confidence": number, "status": "matched" | "mismatched" | "flagged", "auditor_notes": "string" }
-        `;
+1. For EACH transaction, search the supporting documents for a row where the vendor name and amount match.
+2. Compare the amount in the dump vs the amount found in the supporting document.
+3. If amounts match exactly → status: "matched", confidence: 0.95–1.0
+4. If amounts differ → status: "mismatched", confidence: 0.5–0.7, note the difference
+5. If no matching record found → status: "flagged", confidence: 0.0–0.3, explain what was searched
+6. Return ONLY a raw JSON array. No markdown, no explanation, no extra text.
+
+JSON FORMAT (one object per transaction, exactly ${transactions.length} objects):
+[{ "txn_id": "string", "vendor": "string", "amount_dump": number, "amount_doc": number, "confidence": number, "status": "matched"|"mismatched"|"flagged", "auditor_notes": "string" }]`;
+
+        console.log(`Prompt length: ${prompt.length} chars.`);
 
         const completion = await openai.chat.completions.create({
           model: modelName,
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.1,
-          max_tokens: 1024,
+          temperature: 0.05,
+          max_tokens: 4096,
         });
 
         let aiResultText = completion.choices[0].message.content.trim();
