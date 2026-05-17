@@ -85,18 +85,11 @@ app.post('/api/process-batch', async (req, res) => {
           throw new Error('No transactions found in the Excel dump. Please check the file format.');
         }
 
-        // Use column mapping to build structured transaction objects
-        const txnIdCol = columnMapping?.txnId;
-        const vendorCol = columnMapping?.vendor;
-        const amountCol = columnMapping?.amount;
-
-        const transactions = allRows.slice(0, 25).map((row, idx) => ({
-          txn_id: String(row[txnIdCol] ?? idx + 1),
-          vendor: String(row[vendorCol] ?? 'Unknown'),
-          amount: Number(row[amountCol]) || 0,
-          raw: row  // keep all columns for context
-        }));
-        console.log(`Structured ${transactions.length} transactions using mapping: ID=${txnIdCol}, Vendor=${vendorCol}, Amount=${amountCol}`);
+        // Auto-extract: pass all column headers and a sample row to the AI so it can infer semantics
+        const allHeaders = Object.keys(allRows[0]);
+        const sampleRow = allRows[0];
+        const txnRows = allRows.slice(0, 25);
+        console.log(`Excel columns detected: ${allHeaders.join(', ')}`);
 
         // 3. Download and Parse Support Docs — format as readable markdown tables
         let supportSections = [];
@@ -108,15 +101,14 @@ app.post('/api/process-batch', async (req, res) => {
           if (['xlsx','csv','xls','xlsm','xlsb'].includes(ext)) {
             const buf = await supportBlob.arrayBuffer();
             const wb = xlsx.read(buf, { type: 'buffer' });
-            // Parse ALL sheets
             for (const sName of wb.SheetNames) {
               const rows = xlsx.utils.sheet_to_json(wb.Sheets[sName]);
               if (rows.length > 0) {
-                supportSections.push(`--- File: ${fileName} | Sheet: ${sName} ---\n${toMarkdownTable(rows.slice(0, 50))}`);
+                supportSections.push(`--- File: ${fileName} | Sheet: ${sName} ---\n${toMarkdownTable(rows.slice(0, 60))}`);
               }
             }
           } else {
-            supportSections.push(`--- File: ${fileName} ---\n[Non-spreadsheet file — manual review required]`);
+            supportSections.push(`--- File: ${fileName} ---\n[Image/PDF — cannot be parsed as text in this version]`);
           }
         }
 
@@ -126,34 +118,37 @@ app.post('/api/process-batch', async (req, res) => {
 
         console.log(`Support document text length: ${supportText.length} chars.`);
 
-        // 4. Build structured, explicit prompt
-        const txnTable = transactions.map(t =>
-          `- txn_id: "${t.txn_id}" | vendor: "${t.vendor}" | amount: ${t.amount}`
-        ).join('\n');
+        // 4. Build prompt — AI infers columns from headers + sample, then matches
+        const txnDumpTable = toMarkdownTable(txnRows);
 
-        const prompt = `You are an expert financial auditor AI. Your task is to match each transaction from the TRANSACTION DUMP against the SUPPORTING DOCUMENTS to verify if each transaction is correct.
+        const prompt = `You are an expert financial auditor AI. You will be given a TRANSACTION DUMP and SUPPORTING DOCUMENTS. Your job is to match each transaction against the supporting documents.
 
-COLUMN MAPPING (how the transaction dump is structured):
-- Transaction ID is in column: "${txnIdCol}"
-- Vendor / Party name is in column: "${vendorCol}"
-- Amount is in column: "${amountCol}"
+STEP 1 — UNDERSTAND THE TRANSACTION DUMP COLUMNS:
+The transaction dump has the following columns: ${allHeaders.join(', ')}
+Sample row: ${JSON.stringify(sampleRow)}
 
-TRANSACTION DUMP (${transactions.length} transactions):
-${txnTable}
+From these column names and the sample row, intelligently identify:
+- Which column is the unique Transaction ID / Reference Number
+- Which column is the Vendor / Party / Supplier name
+- Which column is the transaction Amount / Value
 
-SUPPORTING DOCUMENTS:
+STEP 2 — TRANSACTION DUMP (${txnRows.length} rows):
+${txnDumpTable}
+
+STEP 3 — SUPPORTING DOCUMENTS:
 ${supportText}
 
-INSTRUCTIONS:
-1. For EACH transaction, search the supporting documents for a row where the vendor name and amount match.
-2. Compare the amount in the dump vs the amount found in the supporting document.
-3. If amounts match exactly → status: "matched", confidence: 0.95–1.0
-4. If amounts differ → status: "mismatched", confidence: 0.5–0.7, note the difference
-5. If no matching record found → status: "flagged", confidence: 0.0–0.3, explain what was searched
-6. Return ONLY a raw JSON array. No markdown, no explanation, no extra text.
+STEP 4 — MATCHING INSTRUCTIONS:
+For EACH row in the transaction dump:
+1. Use the vendor name and amount you identified to search the supporting documents for a matching entry.
+2. Look for fuzzy matches on vendor name (ignore case, abbreviations, extra spaces).
+3. If the amount matches → status: "matched", confidence: 0.9–1.0
+4. If vendor matches but amount differs → status: "mismatched", confidence: 0.5–0.8, note both amounts
+5. If no match found at all → status: "flagged", confidence: 0.0–0.4, explain what you searched for
+6. Return ONLY a raw JSON array with exactly ${txnRows.length} objects. No markdown fences, no explanation text.
 
-JSON FORMAT (one object per transaction, exactly ${transactions.length} objects):
-[{ "txn_id": "string", "vendor": "string", "amount_dump": number, "amount_doc": number, "confidence": number, "status": "matched"|"mismatched"|"flagged", "auditor_notes": "string" }]`;
+OUTPUT FORMAT:
+[{ "txn_id": "<the transaction reference>", "vendor": "<vendor name>", "amount_dump": <number from dump>, "amount_doc": <number from support doc or 0 if not found>, "confidence": <0.0–1.0>, "status": "matched"|"mismatched"|"flagged", "auditor_notes": "<brief explanation>" }]`;
 
         console.log(`Prompt length: ${prompt.length} chars.`);
 
