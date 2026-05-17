@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { CheckCircle, AlertTriangle, Clock, User, Download } from 'lucide-react';
+import { CheckCircle, AlertTriangle, Clock, User, Download, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 export default function ClientDashboard() {
@@ -120,6 +120,28 @@ export default function ClientDashboard() {
     URL.revokeObjectURL(url);
   };
 
+  const deleteBatch = async (batchId) => {
+    if (!window.confirm("Are you sure you want to delete this batch and all its results? This action cannot be undone.")) return;
+    
+    try {
+      const { error } = await supabase
+        .from('batches')
+        .delete()
+        .eq('id', batchId);
+        
+      if (error) throw error;
+      
+      // Update state locally
+      setBatches(prev => prev.filter(b => b.id !== batchId));
+      
+      // Re-fetch data to update stats
+      fetchData();
+    } catch (error) {
+      console.error("Delete Error:", error);
+      alert("Failed to delete batch: " + error.message);
+    }
+  };
+
   return (
     <div>
       <div className="page-header flex justify-between items-center" style={{ marginBottom: '2rem' }}>
@@ -197,13 +219,22 @@ export default function ClientDashboard() {
                       {batch.status === 'uploaded' && <span className="status-badge status-warning">Uploaded</span>}
                     </td>
                     <td>
-                      <button 
-                        className="btn btn-outline text-muted flex items-center gap-2" 
-                        disabled={batch.status !== 'completed'}
-                        onClick={() => downloadReport(batch.id, batch.filename)}
-                      >
-                        <Download size={14}/> Download Report
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button 
+                          className="btn btn-outline text-muted flex items-center gap-2" 
+                          disabled={batch.status !== 'completed'}
+                          onClick={() => downloadReport(batch.id, batch.filename)}
+                        >
+                          <Download size={14}/> Download Report
+                        </button>
+                        <button 
+                          className="btn btn-outline text-danger flex items-center gap-2" 
+                          onClick={() => deleteBatch(batch.id)}
+                          style={{ borderColor: 'rgba(239, 68, 68, 0.2)', color: 'var(--danger-color)' }}
+                        >
+                          <Trash2 size={14}/> Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
