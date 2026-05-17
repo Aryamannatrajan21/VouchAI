@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { CheckCircle, AlertTriangle, Clock, User, Download, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as XLSX from 'xlsx';
 
 export default function ClientDashboard() {
   const { session } = useOutletContext();
@@ -94,32 +95,38 @@ export default function ClientDashboard() {
       return;
     }
 
-    // Convert to CSV
-    const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence', 'Status', 'Notes'];
-    const csvRows = [headers.join(',')];
-    
-    data.forEach(row => {
-      const values = [
-        `"${row.txn_id || ''}"`,
-        `"${row.vendor || ''}"`,
-        row.amount_dump || 0,
-        row.amount_doc || 0,
-        row.confidence || 0,
-        `"${row.status || ''}"`,
-        `"${row.auditor_notes || ''}"`
-      ];
-      csvRows.push(values.join(','));
-    });
+    // Build Excel workbook
+    const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Auditor Notes'];
 
-    const csvContent = csvRows.join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Vouching_Report_${filename}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const rows = data.map(row => ([
+      row.txn_id || '',
+      row.vendor || '',
+      row.amount_dump || 0,
+      row.amount_doc || 0,
+      Math.round((row.confidence || 0) * 100),
+      (row.status || '').toUpperCase(),
+      row.auditor_notes || ''
+    ]));
+
+    const worksheetData = [headers, ...rows];
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+
+    // Set column widths
+    worksheet['!cols'] = [
+      { wch: 16 },  // Transaction ID
+      { wch: 35 },  // Vendor
+      { wch: 16 },  // Excel Amount
+      { wch: 16 },  // Doc Amount
+      { wch: 16 },  // Confidence
+      { wch: 14 },  // Status
+      { wch: 55 },  // Auditor Notes
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Vouching Report');
+
+    const safeFilename = (filename || 'report').replace(/[^a-zA-Z0-9_\- .]/g, '_');
+    XLSX.writeFile(workbook, `Vouching_Report_${safeFilename}.xlsx`);
   };
 
   const deleteBatch = (batchId) => {
