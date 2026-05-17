@@ -9,6 +9,7 @@ export default function DocumentUpload() {
   const [supportFiles, setSupportFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
+  const [processingMode, setProcessingMode] = useState('8b');
 
   const handleExcelChange = (e) => {
     if (e.target.files && e.target.files[0]) {
@@ -66,7 +67,8 @@ export default function DocumentUpload() {
         body: JSON.stringify({
           clientId,
           excelPath,
-          supportPaths
+          supportPaths,
+          processingMode
         })
       });
       
@@ -169,11 +171,51 @@ export default function DocumentUpload() {
            <p className="text-muted" style={{ textAlign: 'center', padding: '1rem 0' }}>No files selected yet.</p>
         )}
 
+        {/* AI MODEL SELECTOR TOGGLE */}
+        <div style={{ margin: '1.5rem 0', borderTop: '1px solid var(--border-color)', paddingTop: '1.5rem' }}>
+          <label className="input-label" style={{ marginBottom: '0.75rem' }}>AI Processing Engine</label>
+          <div className="flex gap-4">
+            <div 
+              onClick={() => setProcessingMode('8b')}
+              style={{
+                flex: 1,
+                padding: '1rem',
+                border: '1px solid',
+                borderColor: processingMode === '8b' ? 'var(--primary-color)' : 'var(--border-color)',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                backgroundColor: processingMode === '8b' ? 'rgba(79, 70, 229, 0.05)' : 'transparent',
+                transition: 'all 0.2s'
+              }}
+            >
+              <h4 style={{ margin: '0 0 0.25rem 0', color: processingMode === '8b' ? 'var(--primary-color)' : 'var(--text-primary)' }}>Turbo Match (8B)</h4>
+              <p className="text-muted" style={{ margin: 0, fontSize: '0.75rem' }}>~2-5 seconds. Lightning fast optimized structural matching.</p>
+            </div>
+            
+            <div 
+              onClick={() => setProcessingMode('70b')}
+              style={{
+                flex: 1,
+                padding: '1rem',
+                border: '1px solid',
+                borderColor: processingMode === '70b' ? 'var(--primary-color)' : 'var(--border-color)',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                backgroundColor: processingMode === '70b' ? 'rgba(79, 70, 229, 0.05)' : 'transparent',
+                transition: 'all 0.2s'
+              }}
+            >
+              <h4 style={{ margin: '0 0 0.25rem 0', color: processingMode === '70b' ? 'var(--primary-color)' : 'var(--text-primary)' }}>Deep Audit (70B)</h4>
+              <p className="text-muted" style={{ margin: 0, fontSize: '0.75rem' }}>~20-30 seconds. In-depth logical analysis & reasoning.</p>
+            </div>
+          </div>
+        </div>
+
         <button 
           onClick={handleUpload}
           className="btn btn-primary w-full" 
           disabled={uploading || !excelFile}
-          style={{ padding: '1rem', fontSize: '1rem', marginTop: '1rem' }}
+          style={{ padding: '1rem', fontSize: '1rem', marginTop: '0.5rem' }}
         >
           {uploading ? 'Uploading securely...' : 'Upload & Start AI Vouching'}
         </button>

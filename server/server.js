@@ -26,7 +26,7 @@ const openai = new OpenAI({
 // Endpoint to process a batch
 app.post('/api/process-batch', async (req, res) => {
   try {
-    const { excelPath, supportPaths, clientId } = req.body;
+    const { excelPath, supportPaths, clientId, processingMode } = req.body;
     
     if (!excelPath || !clientId) {
       return res.status(400).json({ error: 'Missing required parameters' });
@@ -55,6 +55,11 @@ app.post('/api/process-batch', async (req, res) => {
       try {
         console.log(`Starting AI processing for batch ${dbBatchId}...`);
         
+        // Determine AI model to use
+        const isTurbo = processingMode === '8b';
+        const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.1-70b-instruct";
+        console.log(`Using AI Model: ${modelName} (Turbo: ${isTurbo})`);
+
         // 2. Download and Parse Excel
         const { data: excelBlob, error: downloadError } = await supabase.storage.from('uploads').download(excelPath);
         if (downloadError) throw downloadError;
@@ -107,7 +112,7 @@ Format per object:
         `;
 
         const completion = await openai.chat.completions.create({
-          model: "meta/llama-3.1-70b-instruct",
+          model: modelName,
           messages: [{ role: "user", content: prompt }],
           temperature: 0.1,
           max_tokens: 1024,
