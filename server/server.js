@@ -64,7 +64,12 @@ app.post('/api/process-batch', async (req, res) => {
         const workbook = xlsx.read(arrayBuffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const transactions = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        console.log(`Extracted ${transactions.length} transactions from Excel dump.`);
         
+        if (transactions.length === 0) {
+          throw new Error('No transactions found in the Excel dump. Please check the file format.');
+        }
+
         // 3. Download and Parse Support Docs (Mocking PDF/Image extraction for simplicity, using text from Excel if provided)
         let supportText = '';
         for (const path of supportPaths) {
@@ -80,18 +85,25 @@ app.post('/api/process-batch', async (req, res) => {
              }
            }
         }
+        
+        console.log(`Extracted support documents text. Length: ${supportText.length} chars.`);
 
         // 4. Call Nvidia API
         const prompt = `
-You are an expert AI Auditor. Reconcile the following transactions against the support documents.
+You are an expert AI Auditor. Your job is to reconcile the transactions provided in the "Transactions JSON" against the "Support Documents Data".
+
 Transactions JSON:
 ${JSON.stringify(transactions.slice(0, 10))} // Limiting to 10 for prototype
 
 Support Documents Data:
 ${supportText}
 
-Output a strictly formatted JSON array of objects with keys: txn_id (string), vendor (string), amount_dump (number), amount_doc (number), confidence (number 0-100), status (one of: 'matched', 'mismatched', 'flagged').
-If you cannot find the doc, set status to 'flagged'. ONLY output the JSON array, no markdown.
+INSTRUCTIONS:
+1. You MUST return exactly one JSON object for EVERY transaction in the Transactions JSON.
+2. If you cannot find the supporting document, set status to 'flagged' and explain why in 'auditor_notes'.
+3. Output a strictly formatted JSON array of objects. Do NOT wrap in markdown.
+Format per object:
+{ "txn_id": "string", "vendor": "string", "amount_dump": number, "amount_doc": number, "confidence": number, "status": "matched" | "mismatched" | "flagged", "auditor_notes": "string" }
         `;
 
         const completion = await openai.chat.completions.create({
@@ -106,7 +118,15 @@ If you cannot find the doc, set status to 'flagged'. ONLY output the JSON array,
         if (aiResultText.startsWith('```json')) aiResultText = aiResultText.replace(/```json/g, '').replace(/```/g, '').trim();
         if (aiResultText.startsWith('```')) aiResultText = aiResultText.replace(/```/g, '').trim();
         
-        const aiResults = JSON.parse(aiResultText);
+        console.log(`AI Raw Output:`, aiResultText);
+        let aiResults = [];
+        try {
+          aiResults = JSON.parse(aiResultText);
+          if (!Array.isArray(aiResults)) aiResults = [aiResults];
+        } catch (e) {
+          console.error("Failed to parse AI JSON:", aiResultText);
+          throw new Error("AI returned invalid JSON format");
+        }
 
         // 5. Save Results to DB
         const resultsToInsert = aiResults.map(r => ({
