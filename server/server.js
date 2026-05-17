@@ -122,15 +122,36 @@ Format per object:
         console.log(`AI Raw Output:`, aiResultText);
         let aiResults = [];
         try {
-          // Robustly extract JSON Array from text to ignore conversational prefixes/suffixes
-          const start = aiResultText.indexOf('[');
-          const end = aiResultText.lastIndexOf(']');
-          if (start !== -1 && end !== -1 && end > start) {
-            const jsonStr = aiResultText.substring(start, end + 1);
-            aiResults = JSON.parse(jsonStr);
+          // Robustly extract JSON Array from text to ignore conversational prefixes/suffixes & multiple arrays
+          let parsedData = null;
+          const arrayRegex = /\[[\s\S]*?\]/g;
+          let match;
+          
+          while ((match = arrayRegex.exec(aiResultText)) !== null) {
+            try {
+              const parsed = JSON.parse(match[0]);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                parsedData = parsed;
+                break; // Found a valid JSON array!
+              }
+            } catch (err) {
+              // Ignore single block parse error and check next match
+            }
+          }
+
+          if (parsedData) {
+            aiResults = parsedData;
           } else {
-            // Fallback to parsing direct JSON
-            aiResults = JSON.parse(aiResultText);
+            // Fallback to absolute boundaries
+            const start = aiResultText.indexOf('[');
+            const end = aiResultText.lastIndexOf(']');
+            if (start !== -1 && end !== -1 && end > start) {
+              const jsonStr = aiResultText.substring(start, end + 1);
+              aiResults = JSON.parse(jsonStr);
+            } else {
+              // Final fallback
+              aiResults = JSON.parse(aiResultText);
+            }
           }
           if (!Array.isArray(aiResults)) aiResults = [aiResults];
         } catch (e) {
