@@ -7,6 +7,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import AuthPage from './pages/AuthPage';
 import ClientDashboard from './pages/ClientDashboard';
 import DocumentUpload from './pages/DocumentUpload';
+import ClientReports from './pages/ClientReports';
 import AuditorDashboard from './pages/AuditorDashboard';
 import AdminDashboard from './pages/AdminDashboard';
 
@@ -21,7 +22,7 @@ function App() {
           <Route element={<ProtectedRoute allowedRoles={['user', 'admin']} />}>
             <Route path="user/dashboard" element={<ClientDashboard />} />
             <Route path="user/upload" element={<DocumentUpload />} />
-            <Route path="user/reports" element={<div><div className="page-header"><h1>User Reports</h1></div></div>} />
+            <Route path="user/reports" element={<ClientReports />} />
           </Route>
           
           {/* Auditor Routes - Protected */}
