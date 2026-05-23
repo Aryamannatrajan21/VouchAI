@@ -4,7 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
 const multer = require('multer');
-const pdf = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 const xlsx = require('xlsx');
 
 global.WebSocket = require('ws');
@@ -24,6 +24,30 @@ const openai = new OpenAI({
   apiKey: process.env.NVIDIA_API_KEY,
   baseURL: 'https://integrate.api.nvidia.com/v1',
 });
+
+// Helper: Sleep utility
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper: Robustly retry API calls on 429 Rate Limits with Exponential Backoff
+async function retryOpenAICall(fn, retries = 5, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRateLimit = err.status === 429 || 
+                          (err.message && err.message.includes('429')) ||
+                          (err.status === 503) ||
+                          (err.message && err.message.includes('503'));
+      if (isRateLimit && i < retries - 1) {
+        const waitTime = delay * Math.pow(2, i) + Math.random() * 1000;
+        console.warn(`[API Rate Limit/Overload] Retrying in ${Math.round(waitTime)}ms... (Attempt ${i+1}/${retries})`);
+        await sleep(waitTime);
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 // Helper: robustly parse JSON from LLM output by removing markdown backticks, conversational wrapping, handling loose JSON (single quotes, trailing commas), stripping comments, and cleaning formatted numbers
 function parseRobustJSON(text) {
@@ -101,46 +125,27 @@ function toMarkdownTable(rows) {
   return [headerRow, divider, ...dataRows].join('\n');
 }
 
-// Helper: Parse PDF page by page using pdf-parse custom pagerender
+// Helper: Parse PDF page by page using PDFParse class
 async function parsePDFPages(buffer) {
-  let pageCount = 0;
-  const options = {
-    pagerender: function (pageData) {
-      return pageData.getTextContent().then(function (textContent) {
-        pageCount++;
-        let lastY, text = '';
-        for (let item of textContent.items) {
-          if (lastY == item.transform[5] || !lastY) {
-            text += item.str + ' ';
-          } else {
-            text += '\n' + item.str + ' ';
-          }
-          lastY = item.transform[5];
-        }
-        return `\n--- PAGE_START_${pageCount} ---\n` + text + `\n--- PAGE_END_${pageCount} ---\n`;
-      });
-    }
-  };
-
-  const data = await pdf(buffer, options);
-  const pages = [];
-  for (let i = 1; i <= pageCount; i++) {
-    const startTag = `--- PAGE_START_${i} ---`;
-    const endTag = `--- PAGE_END_${i} ---`;
-    const startIdx = data.text.indexOf(startTag);
-    const endIdx = data.text.indexOf(endTag);
-    
-    if (startIdx !== -1 && endIdx !== -1) {
-      const pageText = data.text.substring(startIdx + startTag.length, endIdx).trim();
-      pages.push({
-        nodeType: 'page',
-        identifier: `Page ${i}`,
-        rawText: pageText,
-        textPreview: pageText.substring(0, 1500)
-      });
-    }
+  const parser = new PDFParse({ data: buffer });
+  const result = await parser.getText();
+  await parser.destroy();
+  
+  if (!result.pages || result.pages.length === 0) {
+    return [{
+      nodeType: 'page',
+      identifier: 'Page 1',
+      rawText: result.text || '',
+      textPreview: (result.text || '').substring(0, 1500)
+    }];
   }
-  return pages;
+  
+  return result.pages.map(page => ({
+    nodeType: 'page',
+    identifier: `Page ${page.num}`,
+    rawText: page.text || '',
+    textPreview: (page.text || '').substring(0, 1500)
+  }));
 }
 
 // Helper: Parse Excel worksheets into nodes
@@ -193,11 +198,13 @@ Return ONLY a raw JSON object with these exact keys. No conversational prefixes,
   "summary": "..."
 }`;
 
-    const response = await openai.chat.completions.create({
-      model: "meta/llama-3.1-8b-instruct",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.05,
-      max_tokens: 500,
+    const response = await retryOpenAICall(async () => {
+      return await openai.chat.completions.create({
+        model: "meta/llama-3.1-8b-instruct",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.05,
+        max_tokens: 500,
+      });
     });
     
     const text = response.choices[0].message.content.trim();
@@ -335,12 +342,11 @@ app.post('/api/process-batch', async (req, res) => {
         }
 
         // Generate metadata summaries for all nodes to compile the PageTreeIndex
-        console.log(`Indexing ${supportNodes.length} document pages/sheets using Llama 3.1 8B...`);
-        for (let i = 0; i < supportNodes.length; i += 5) {
-          const chunk = supportNodes.slice(i, i + 5);
-          await Promise.all(chunk.map(async (node) => {
-            node.metadata = await generateNodeMetadata(node);
-          }));
+        console.log(`Indexing ${supportNodes.length} document pages/sheets using Llama 3.1 8B sequentially with rate limit protection...`);
+        for (let i = 0; i < supportNodes.length; i++) {
+          const node = supportNodes[i];
+          node.metadata = await generateNodeMetadata(node);
+          await sleep(500); // 500ms delay to respect API rate limits
         }
 
         const pageTreeIndex = supportNodes.map((node, index) => ({
@@ -383,20 +389,68 @@ INSTRUCTIONS:
 5. Return ONLY a raw JSON array of integers representing the indexIds. Do not add any explanation or markdown tags.
 Example output: [0, 2]`;
 
-            const navResponse = await openai.chat.completions.create({
-              model: "meta/llama-3.1-8b-instruct",
-              messages: [{ role: "user", content: navigationPrompt }],
-              temperature: 0.05,
-              max_tokens: 100,
+            const navResponse = await retryOpenAICall(async () => {
+              return await openai.chat.completions.create({
+                model: "meta/llama-3.1-8b-instruct",
+                messages: [{ role: "user", content: navigationPrompt }],
+                temperature: 0.05,
+                max_tokens: 100,
+              });
             });
 
             const navText = navResponse.choices[0].message.content.trim();
             candidateIndices = parseRobustJSON(navText);
             if (!Array.isArray(candidateIndices)) candidateIndices = [];
+            
+            // Clean and validate candidateIndices (ensure they are integers inside bounds)
+            candidateIndices = candidateIndices
+              .map(x => parseInt(x, 10))
+              .filter(x => !isNaN(x) && x >= 0 && x < supportNodes.length);
+
+            // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
+            if (candidateIndices.length === 0) {
+              const keys = Object.keys(txn);
+              const vendorKey = allHeaders[1] || keys[1] || 'Vendor';
+              const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
+              
+              const vendorQuery = (txn[vendorKey] || '').toLowerCase().split(/[\s,]+/)[0];
+              const amountQuery = String(txn[amountKey] || '');
+              
+              candidateIndices = pageTreeIndex.filter(p => {
+                const vName = (p.vendorName || '').toLowerCase();
+                const summary = (p.summary || '').toLowerCase();
+                const docType = (p.documentType || '').toLowerCase();
+                const fName = (p.fileName || '').toLowerCase();
+                
+                const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
+                const vendorMatch = vendorQuery && (vName.includes(vendorQuery) || summary.includes(vendorQuery) || fName.includes(vendorQuery));
+                
+                return amountMatch || vendorMatch;
+              }).map(p => p.indexId);
+            }
           } catch (navErr) {
             console.error("Navigation error:", navErr);
-            // Fallback: search all nodes
-            candidateIndices = pageTreeIndex.map(p => p.indexId);
+            // Fallback: Perform local keyword/amount matching to keep candidate indices relevant and safe from token overflow
+            const keys = Object.keys(txn);
+            const vendorKey = allHeaders[1] || keys[1] || 'Vendor';
+            const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
+            
+            const vendorQuery = (txn[vendorKey] || '').toLowerCase();
+            const amountQuery = String(txn[amountKey] || '');
+            candidateIndices = pageTreeIndex.filter(p => {
+              const vName = (p.vendorName || '').toLowerCase();
+              const summary = (p.summary || '').toLowerCase();
+              const docType = (p.documentType || '').toLowerCase();
+              return vName.includes(vendorQuery) || 
+                     vendorQuery.includes(vName) || 
+                     summary.includes(vendorQuery) || 
+                     summary.includes(amountQuery) ||
+                     docType.includes(vendorQuery);
+            }).map(p => p.indexId);
+            
+            if (candidateIndices.length === 0) {
+              candidateIndices = [0]; // Fallback to first page if absolutely nothing matches
+            }
           }
 
           console.log(`Selected candidate index IDs:`, candidateIndices);
@@ -456,12 +510,15 @@ Return ONLY a raw JSON object matching the following structure. No markdown form
 }`;
 
             const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
-            const auditResponse = await openai.chat.completions.create({
-              model: modelName,
-              messages: [{ role: "user", content: reconciliationPrompt }],
-              temperature: 0.05,
-              max_tokens: 800,
+            const auditResponse = await retryOpenAICall(async () => {
+              return await openai.chat.completions.create({
+                model: modelName,
+                messages: [{ role: "user", content: reconciliationPrompt }],
+                temperature: 0.05,
+                max_tokens: 800,
+              });
             });
+            await sleep(300); // spacing delay to prevent hitting subsequent rate limits
 
             const auditText = auditResponse.choices[0].message.content.trim();
             const auditResult = parseRobustJSON(auditText);
