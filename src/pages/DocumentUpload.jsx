@@ -23,6 +23,42 @@ export default function DocumentUpload() {
     setSupportFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Helper to convert hex string to Uint8Array
+  const hexToBytes = (hex) => {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    }
+    return bytes;
+  };
+
+  // Encrypt file using AES-GCM via browser Web Crypto API
+  const encryptFile = async (file, clearKeyHex, ivHex) => {
+    const keyBytes = hexToBytes(clearKeyHex);
+    const ivBytes = hexToBytes(ivHex);
+    
+    const cryptoKey = await window.crypto.subtle.importKey(
+      'raw',
+      keyBytes,
+      { name: 'AES-GCM' },
+      false,
+      ['encrypt']
+    );
+    
+    const fileBuffer = await file.arrayBuffer();
+    const encryptedBuffer = await window.crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: ivBytes,
+        tagLength: 128 // 16 bytes tag appended at the end
+      },
+      cryptoKey,
+      fileBuffer
+    );
+    
+    return new Blob([encryptedBuffer], { type: 'application/octet-stream' });
+  };
+
   const handleUpload = async () => {
     if (!excelFile) {
       setMessage('Error: Please provide a Transaction Dump (Excel).');
@@ -32,29 +68,83 @@ export default function DocumentUpload() {
     setMessage('');
     try {
       const clientId = session.user.id;
-      const timestamp = Date.now();
 
-      const excelPath = `${clientId}/${timestamp}_${excelFile.name}`;
-      const { error: excelError } = await supabase.storage.from('uploads').upload(excelPath, excelFile);
-      if (excelError) throw excelError;
+      // 1. Prepare and Upload Transaction Excel Dump
+      setMessage('Encrypting and uploading Excel dump...');
+      const excelPrepRes = await fetch('http://localhost:3000/api/prepare-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: excelFile.name,
+          mimeType: excelFile.type || 'application/octet-stream',
+          clientId
+        })
+      });
+      if (!excelPrepRes.ok) {
+        const errText = await excelPrepRes.text();
+        throw new Error(`Failed to prepare excel upload: ${errText}`);
+      }
+      const { signedUrl: excelSignedUrl, fileUrl: excelPath, clearKey: excelClearKey, iv: excelIv } = await excelPrepRes.json();
 
-      for (const file of supportFiles) {
-        const { error } = await supabase.storage
-          .from('uploads')
-          .upload(`${clientId}/${timestamp}_${file.name}`, file);
-        if (error) console.error('Support file upload error:', error);
+      const encryptedExcelBlob = await encryptFile(excelFile, excelClearKey, excelIv);
+      const excelUploadRes = await fetch(excelSignedUrl, {
+        method: 'PUT',
+        body: encryptedExcelBlob,
+        headers: { 'Content-Type': 'application/octet-stream' }
+      });
+      if (!excelUploadRes.ok) {
+        const errText = await excelUploadRes.text();
+        throw new Error(`Failed to upload encrypted Excel dump: ${errText}`);
       }
 
-      const supportPaths = supportFiles.map(f => `${clientId}/${timestamp}_${f.name}`);
-      const response = await fetch('http://localhost:3000/api/process-batch', {
+      // 2. Prepare and Upload Supporting Documents
+      const supportPaths = [];
+      for (let i = 0; i < supportFiles.length; i++) {
+        const file = supportFiles[i];
+        setMessage(`Encrypting and uploading supporting document [${i + 1}/${supportFiles.length}]: ${file.name}...`);
+        
+        const filePrepRes = await fetch('http://localhost:3000/api/prepare-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            clientId
+          })
+        });
+        if (!filePrepRes.ok) {
+          console.error(`Failed to prepare support file ${file.name}`);
+          continue;
+        }
+        const { signedUrl: fileSignedUrl, fileUrl: filePath, clearKey: fileClearKey, iv: fileIv } = await filePrepRes.json();
+
+        const encryptedFileBlob = await encryptFile(file, fileClearKey, fileIv);
+        const fileUploadRes = await fetch(fileSignedUrl, {
+          method: 'PUT',
+          body: encryptedFileBlob,
+          headers: { 'Content-Type': 'application/octet-stream' }
+        });
+        if (!fileUploadRes.ok) {
+          console.error(`Failed to upload encrypted support file ${file.name}`);
+          continue;
+        }
+        supportPaths.push(filePath);
+      }
+
+      // 3. Trigger Batch Creation and Secure Processing
+      setMessage('Finalizing secure batch creation...');
+      const response = await fetch('http://localhost:3000/api/create-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, excelPath, supportPaths, processingMode })
       });
 
-      if (!response.ok) throw new Error('Failed to trigger AI processing');
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to trigger secure AI processing: ${errText}`);
+      }
 
-      setMessage('Success! Files securely uploaded and AI processing has started.');
+      setMessage('Success! Files securely encrypted, uploaded, and AI processing has started.');
       setExcelFile(null);
       setSupportFiles([]);
     } catch (error) {

@@ -9,6 +9,8 @@ const xlsx = require('xlsx');
 
 global.WebSocket = require('ws');
 
+const { encryptText, decryptText, wrapKey, unwrapKey, generateSecureKeyIV, decryptBuffer } = require('./crypto_helper');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -49,71 +51,80 @@ async function retryOpenAICall(fn, retries = 5, delay = 2000) {
   }
 }
 
-// Helper: robustly parse JSON from LLM output by removing markdown backticks, conversational wrapping, handling loose JSON (single quotes, trailing commas), stripping comments, and cleaning formatted numbers
+// Helper: robustly parse JSON from LLM output by extracting the balanced bracket/brace structure
 function parseRobustJSON(text) {
   text = text.trim();
   
-  // Remove markdown code fences if present
   if (text.startsWith('```')) {
     text = text.replace(/^```[a-zA-Z]*\n/, '');
     text = text.replace(/\n```$/, '');
     text = text.trim();
   }
   
-  // Clean numbers with commas in unquoted values (e.g. : 87,000 -> : 87000)
   text = text.replace(/(:\s*)(\d{1,3}(?:,\d{3})+(\.\d+)?)/g, (match, p1, p2) => {
     return p1 + p2.replace(/,/g, '');
   });
   
-  const startBrace = text.indexOf('{');
-  const startBracket = text.indexOf('[');
-  
+  let braceCount = 0;
+  let bracketCount = 0;
+  let inString = false;
+  let escape = false;
   let startIdx = -1;
   let endIdx = -1;
   
-  if (startBrace !== -1 && (startBracket === -1 || startBrace < startBracket)) {
-    startIdx = startBrace;
-    endIdx = text.lastIndexOf('}');
-  } else if (startBracket !== -1) {
-    startIdx = startBracket;
-    endIdx = text.lastIndexOf(']');
-  }
-  
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    const jsonStr = text.substring(startIdx, endIdx + 1);
-    try {
-      return JSON.parse(jsonStr);
-    } catch (e) {
-      try {
-        // Strip out single-line and multi-line comments
-        let cleanJS = jsonStr.replace(/\/\/.*?\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
-        return Function(`return (${cleanJS});`)();
-      } catch (innerErr) {
-        try {
-          return eval(`(${jsonStr})`);
-        } catch (evalErr) {
-          throw e; // Throw original JSON.parse error if both fail
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === '\\') {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === '{' || char === '[') {
+        if (startIdx === -1) {
+          startIdx = i;
+        }
+        if (char === '{') braceCount++;
+        if (char === '[') bracketCount++;
+      } else if (char === '}' || char === ']') {
+        if (char === '}') braceCount--;
+        if (char === ']') bracketCount--;
+        
+        if (startIdx !== -1 && braceCount === 0 && bracketCount === 0) {
+          endIdx = i;
+          break;
         }
       }
     }
   }
   
+  let jsonStr = text;
+  if (startIdx !== -1 && endIdx !== -1) {
+    jsonStr = text.substring(startIdx, endIdx + 1);
+  }
+  
   try {
-    return JSON.parse(text);
+    return JSON.parse(jsonStr);
   } catch (e) {
     try {
-      let cleanText = text.replace(/\/\/.*?\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
-      return Function(`return (${cleanText});`)();
+      let cleanJS = jsonStr.replace(/\/\/.*?\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
+      return Function(`return (${cleanJS});`)();
     } catch (innerErr) {
       try {
-        return eval(`(${text})`);
+        return eval(`(${jsonStr})`);
       } catch (evalErr) {
         throw e;
       }
     }
   }
 }
-
 
 // Helper: convert an array of objects into a clean markdown table string
 function toMarkdownTable(rows) {
@@ -181,10 +192,10 @@ CONTENT PREVIEW:
 ${node.textPreview}
 
 Please extract the following fields:
-1. "document_type": e.g. "Invoice", "Receipt", "Purchase Order", "Delivery Note", "Bank Statement", "Ledger", or "Unknown"
-2. "vendor_name": The exact name of the vendor, party, supplier, client, or bank. (e.g. "Reliance Industries")
-3. "total_amount": The primary total, grand total, or invoice amount as a clean number (e.g. 150000.00). 0 if not found.
-4. "invoice_number": The invoice number, reference number, or bill ID. null if not found.
+1. "document_type": e.g. "Invoice", "Receipt", "Purchase Order", "Delivery Note", "Bank Statement", "Ledger", "Fixed Deposit Advice", "Email Approval", or "Unknown"
+2. "vendor_name": The exact name of the vendor, party, supplier, client, bank, or sender. (e.g. "HSBC Bank")
+3. "total_amount": The primary total, principal amount, or invoice amount as a clean number (e.g. 90000000.00). 0 if not found.
+4. "invoice_number": The invoice number, reference number, account number, or bill ID. null if not found.
 5. "date": The date on the document. null if not found.
 6. "summary": A brief 1-sentence description of what this section contains.
 
@@ -213,7 +224,7 @@ Return ONLY a raw JSON object with these exact keys. No conversational prefixes,
     console.error(`Failed to generate metadata for ${node.fileName} (${node.identifier}):`, err);
     return {
       document_type: 'Unknown',
-      vendor_name: node.fileName.replace(/\\.[^/.]+$/, ""),
+      vendor_name: node.fileName.replace(/\.[^/.]+$/, ""),
       total_amount: 0,
       invoice_number: null,
       date: null,
@@ -222,22 +233,70 @@ Return ONLY a raw JSON object with these exact keys. No conversational prefixes,
   }
 }
 
-
-// Endpoint to process a batch
-app.post('/api/process-batch', async (req, res) => {
+// 1. Secure Upload Preparation Endpoint
+app.post('/api/prepare-upload', async (req, res) => {
   try {
-    const { excelPath, supportPaths, clientId, processingMode, columnMapping } = req.body;
+    const { filename, mimeType, clientId } = req.body;
+    if (!filename || !clientId) {
+      return res.status(400).json({ error: 'Missing filename or clientId' });
+    }
+    
+    const timestamp = Date.now();
+    const storagePath = `${clientId}/${timestamp}_${filename}`;
+    
+    // Generate signed upload URL from Supabase (bypassing Express payload limits & keeping it secure)
+    const { data, error } = await supabase.storage
+      .from('uploads')
+      .createSignedUploadUrl(storagePath);
+      
+    if (error) throw error;
+    
+    // Generate ephemeral AES-GCM file key credentials
+    const credentials = generateSecureKeyIV();
+    const wrappedKey = wrapKey(credentials.key);
+    
+    // Write key mapping to PG
+    const { error: keyError } = await supabase
+      .from('file_keys')
+      .insert({
+        file_url: storagePath,
+        wrapped_key: wrappedKey,
+        iv: credentials.iv
+      });
+      
+    if (keyError) throw keyError;
+    
+    res.json({
+      signedUrl: data.signedUrl,
+      fileUrl: storagePath,
+      clearKey: credentials.key,
+      iv: credentials.iv
+    });
+    
+  } catch (err) {
+    console.error("Prepare upload error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Encrypted Batch & Document Creation Endpoint
+app.post('/api/create-batch', async (req, res) => {
+  try {
+    const { clientId, excelPath, supportPaths, processingMode } = req.body;
     
     if (!excelPath || !clientId) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
     
-    // 1. Create Batch Record
+    const rawExcelName = excelPath.split('/').pop().split('_').slice(1).join('_') || excelPath.split('/').pop();
+    const encryptedExcelName = encryptText(rawExcelName);
+    
+    // Insert encrypted batch row
     const { data: batchData, error: batchError } = await supabase
       .from('batches')
       .insert({
         user_id: clientId,
-        filename: excelPath.split('_').slice(1).join('_'), // Strip timestamp
+        filename: encryptedExcelName,
         file_url: excelPath,
         status: 'processing'
       })
@@ -247,102 +306,103 @@ app.post('/api/process-batch', async (req, res) => {
     if (batchError) throw batchError;
     const dbBatchId = batchData.id;
     
-    // Respond immediately
-    res.json({ message: 'Processing started', status: 'processing', batchId: dbBatchId });
+    // Insert encrypted document rows
+    for (const path of supportPaths) {
+      const rawName = path.split('/').pop().split('_').slice(1).join('_') || path.split('/').pop();
+      const encryptedName = encryptText(rawName);
+      
+      const { error: docError } = await supabase
+        .from('documents')
+        .insert({
+          batch_id: dbBatchId,
+          filename: encryptedName,
+          file_url: path
+        });
+      if (docError) console.error("Error creating document record:", docError);
+    }
+    
+    res.json({ message: 'Secure batch created and processing started', batchId: dbBatchId });
 
-    // Background Processing
+    // AI Processing Loop on Decrypted Streams in-memory
     setTimeout(async () => {
       try {
-        console.log(`Starting AI PageIndex RAG processing for batch ${dbBatchId}...`);
-        
-        // Determine AI model to use
+        console.log(`Starting secure decrypted AI processing for batch ${dbBatchId}...`);
         const isTurbo = processingMode === '8b';
-        console.log(`Auditor Processing Mode: ${processingMode} (Turbo: ${isTurbo})`);
 
-        // 2. Download and Parse Transaction Excel Dump
+        // 1. Download and Decrypt Transaction Excel Dump in-memory
+        const { data: excelKeyRow, error: ekErr } = await supabase
+          .from('file_keys')
+          .select('wrapped_key, iv')
+          .eq('file_url', excelPath)
+          .single();
+        if (ekErr || !excelKeyRow) throw new Error("Missing file key for excel dump: " + excelPath);
+        
+        const excelKey = unwrapKey(excelKeyRow.wrapped_key);
+        const excelIv = excelKeyRow.iv;
+
         const { data: excelBlob, error: downloadError } = await supabase.storage.from('uploads').download(excelPath);
         if (downloadError) throw downloadError;
 
-        const arrayBuffer = await excelBlob.arrayBuffer();
-        const workbook = xlsx.read(arrayBuffer, { type: 'buffer' });
+        const excelBuf = Buffer.from(await excelBlob.arrayBuffer());
+        const decryptedExcelBuf = decryptBuffer(excelBuf, excelKey, excelIv);
+
+        const workbook = xlsx.read(decryptedExcelBuf, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const allRows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-        console.log(`Extracted ${allRows.length} rows from transaction Excel dump.`);
+        console.log(`Extracted ${allRows.length} rows securely from decrypted transaction Excel dump.`);
 
         if (allRows.length === 0) {
-          throw new Error('No transactions found in the Excel dump. Please check the file format.');
+          throw new Error('No transactions found in the Excel dump.');
         }
 
         const allHeaders = Object.keys(allRows[0]);
-        const sampleRow = allRows[0];
-        const txnRows = allRows.slice(0, 25); // Audit up to 25 transactions as defined in limits
-        console.log(`Transaction Excel columns detected: ${allHeaders.join(', ')}`);
+        const txnRows = allRows.slice(0, 25); // Audit limit up to 25 transactions
 
-        // 3. Download and Parse Supporting Documents to build PageTreeIndex
-        console.log(`Building PageTreeIndex for ${supportPaths.length} supporting documents...`);
+        // 2. Download and Decrypt Supporting Documents to build PageTreeIndex
+        console.log(`Building secure PageTreeIndex for ${supportPaths.length} supporting documents...`);
         let supportNodes = [];
 
         for (const path of supportPaths) {
+          const { data: keyRow, error: kErr } = await supabase
+            .from('file_keys')
+            .select('wrapped_key, iv')
+            .eq('file_url', path)
+            .single();
+          if (kErr || !keyRow) continue;
+
+          const fileKey = unwrapKey(keyRow.wrapped_key);
+          const fileIv = keyRow.iv;
+
           const { data: supportBlob } = await supabase.storage.from('uploads').download(path);
           if (!supportBlob) continue;
           
+          const rawBuf = Buffer.from(await supportBlob.arrayBuffer());
+          const decryptedBuf = decryptBuffer(rawBuf, fileKey, fileIv);
+          
           const fileName = path.split('/').pop().split('_').slice(1).join('_') || path.split('/').pop();
           const ext = path.split('.').pop().toLowerCase();
-          const buf = Buffer.from(await supportBlob.arrayBuffer());
           
           if (['xlsx','csv','xls','xlsm','xlsb'].includes(ext)) {
-            const sheets = await parseExcelSheets(buf);
+            const sheets = await parseExcelSheets(decryptedBuf);
             sheets.forEach(s => {
               s.fileName = fileName;
               supportNodes.push(s);
             });
           } else if (ext === 'pdf') {
             try {
-              const pages = await parsePDFPages(buf);
+              const pages = await parsePDFPages(decryptedBuf);
               pages.forEach(p => {
                 p.fileName = fileName;
                 supportNodes.push(p);
               });
             } catch (pdfErr) {
               console.error(`Failed to parse PDF ${fileName}:`, pdfErr);
-              supportNodes.push({
-                nodeType: 'pdf_error',
-                identifier: 'PDF Read Error',
-                fileName,
-                rawText: `[Error reading PDF file: ${fileName}]`,
-                textPreview: `PDF file: ${fileName} (failed to parse)`,
-                metadata: {
-                  document_type: 'Unknown (Error PDF)',
-                  vendor_name: fileName.replace(/\.[^/.]+$/, ""),
-                  total_amount: 0,
-                  invoice_number: null,
-                  date: null,
-                  summary: `Unparseable PDF: ${fileName}`
-                }
-              });
             }
-          } else {
-            // Image or other unsupported files - Fallback to filename metadata extraction
-            supportNodes.push({
-              nodeType: 'image',
-              identifier: 'Image Document',
-              fileName,
-              rawText: `[Image document: ${fileName}]`,
-              textPreview: `Image file: ${fileName}`,
-              metadata: {
-                document_type: 'Unknown (Image)',
-                vendor_name: fileName.replace(/\.[^/.]+$/, "").split(/[_\-]/).join(' '),
-                total_amount: 0,
-                invoice_number: null,
-                date: null,
-                summary: `Image upload: ${fileName}`
-              }
-            });
           }
         }
 
-        // Generate metadata summaries for all nodes to compile the PageTreeIndex
-        console.log(`Indexing ${supportNodes.length} document pages/sheets using Llama 3.1 8B sequentially with rate limit protection...`);
+        // Generate metadata summaries for all nodes sequentially with rate limit protection
+        console.log(`Indexing ${supportNodes.length} decrypted document pages/sheets using Llama 3.1 8B...`);
         for (let i = 0; i < supportNodes.length; i++) {
           const node = supportNodes[i];
           node.metadata = await generateNodeMetadata(node);
@@ -361,19 +421,19 @@ app.post('/api/process-batch', async (req, res) => {
           summary: node.metadata.summary
         }));
 
-        console.log(`PageTreeIndex fully compiled with ${pageTreeIndex.length} nodes:`, JSON.stringify(pageTreeIndex, null, 2));
+        console.log(`PageTreeIndex fully compiled with ${pageTreeIndex.length} nodes.`);
 
-        // 4. Navigation & Matching Loop
+        // 3. Navigation & Matching Loop
         const finalVouchingResults = [];
 
         for (let idx = 0; idx < txnRows.length; idx++) {
           const txn = txnRows[idx];
-          console.log(`[${idx+1}/${txnRows.length}] Auditing transaction: ID = ${txn[allHeaders[0]] || 'N/A'}, Vendor = ${txn[allHeaders[1]] || 'N/A'}`);
+          console.log(`[${idx+1}/${txnRows.length}] Secure Auditing transaction: ID = ${txn[allHeaders[0]] || 'N/A'}`);
 
-          // Step 1: Navigating the PageTreeIndex to find the correct node(s)
+          // Step 1: Reasoning-Based Navigation
           let candidateIndices = [];
           try {
-            const navigationPrompt = `You are a professional financial auditor navigation engine. Given a specific transaction and a structured index of all supporting documents (PageTreeIndex), identify which pages or sheets are highly likely to contain the supporting evidence (such as invoices, receipts, or purchase entries) for this transaction.
+            const navigationPrompt = `You are a professional financial auditor data lookup assistant. Given a specific transaction and a structured index of all supporting documents (PageTreeIndex), identify which indexId numbers are highly likely to contain the supporting evidence (such as invoices, fixed deposit advices, bank statements, or approval emails) for this transaction.
 
 TRANSACTION TO AUDIT:
 ${JSON.stringify(txn, null, 2)}
@@ -382,12 +442,11 @@ SUPPORTING DOCUMENTS INDEX (PageTreeIndex):
 ${JSON.stringify(pageTreeIndex, null, 2)}
 
 INSTRUCTIONS:
-1. Search the PageTreeIndex for nodes where the vendor name matches (fuzzy, check for spelling variations or parent entities).
-2. Look for amounts that match or are close to the transaction amount.
-3. Look for matching dates or references.
-4. Output a list of "indexId" numbers of the candidate pages/sheets. If no pages are relevant, return an empty array.
-5. Return ONLY a raw JSON array of integers representing the indexIds. Do not add any explanation or markdown tags.
-Example output: [0, 2]`;
+1. Search the PageTreeIndex for nodes where the vendor or account name matches (fuzzy).
+2. Look for matching amounts or values.
+3. Output a list of "indexId" numbers of the candidate pages/sheets as a raw JSON array.
+4. Return ONLY a raw JSON array of integers representing the indexIds. Do not write code or text.
+Example: [0, 2]`;
 
             const navResponse = await retryOpenAICall(async () => {
               return await openai.chat.completions.create({
@@ -402,74 +461,38 @@ Example output: [0, 2]`;
             candidateIndices = parseRobustJSON(navText);
             if (!Array.isArray(candidateIndices)) candidateIndices = [];
             
-            // Clean and validate candidateIndices (ensure they are integers inside bounds)
+            // Clean and validate candidateIndices
             candidateIndices = candidateIndices
               .map(x => parseInt(x, 10))
               .filter(x => !isNaN(x) && x >= 0 && x < supportNodes.length);
-
-            // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
-            if (candidateIndices.length === 0) {
-              const keys = Object.keys(txn);
-              const vendorKey = allHeaders[1] || keys[1] || 'Vendor';
-              const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
-              
-              const vendorQuery = (txn[vendorKey] || '').toLowerCase().split(/[\s,]+/)[0];
-              const amountQuery = String(txn[amountKey] || '');
-              
-              candidateIndices = pageTreeIndex.filter(p => {
-                const vName = (p.vendorName || '').toLowerCase();
-                const summary = (p.summary || '').toLowerCase();
-                const docType = (p.documentType || '').toLowerCase();
-                const fName = (p.fileName || '').toLowerCase();
-                
-                const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
-                const vendorMatch = vendorQuery && (vName.includes(vendorQuery) || summary.includes(vendorQuery) || fName.includes(vendorQuery));
-                
-                return amountMatch || vendorMatch;
-              }).map(p => p.indexId);
-            }
           } catch (navErr) {
             console.error("Navigation error:", navErr);
-            // Fallback: Perform local keyword/amount matching to keep candidate indices relevant and safe from token overflow
+          }
+
+          // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
+          if (candidateIndices.length === 0) {
             const keys = Object.keys(txn);
             const vendorKey = allHeaders[1] || keys[1] || 'Vendor';
             const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
             
-            const vendorQuery = (txn[vendorKey] || '').toLowerCase();
+            const vendorQuery = (txn[vendorKey] || '').toLowerCase().split(/[\s,]+/)[0];
             const amountQuery = String(txn[amountKey] || '');
+            
             candidateIndices = pageTreeIndex.filter(p => {
               const vName = (p.vendorName || '').toLowerCase();
               const summary = (p.summary || '').toLowerCase();
               const docType = (p.documentType || '').toLowerCase();
-              return vName.includes(vendorQuery) || 
-                     vendorQuery.includes(vName) || 
-                     summary.includes(vendorQuery) || 
-                     summary.includes(amountQuery) ||
-                     docType.includes(vendorQuery);
+              const fName = (p.fileName || '').toLowerCase();
+              
+              const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
+              const vendorMatch = vendorQuery && (vName.includes(vendorQuery) || summary.includes(vendorQuery) || fName.includes(vendorQuery));
+              
+              return amountMatch || vendorMatch;
             }).map(p => p.indexId);
             
             if (candidateIndices.length === 0) {
-              candidateIndices = [0]; // Fallback to first page if absolutely nothing matches
+              candidateIndices = [0];
             }
-          }
-
-          console.log(`Selected candidate index IDs:`, candidateIndices);
-
-          if (candidateIndices.length === 0) {
-            const keys = Object.keys(txn);
-            const txnIdKey = keys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('ref') || k.toLowerCase().includes('no')) || keys[0];
-            const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
-            
-            finalVouchingResults.push({
-              txn_id: String(txn[txnIdKey] ?? 'UNKNOWN'),
-              vendor: txn[allHeaders[1]] || 'UNKNOWN',
-              amount_dump: Number(txn[amountKey]) || 0,
-              amount_doc: 0,
-              confidence: 0.0,
-              status: 'flagged',
-              auditor_notes: `Flagged: No matching supporting documents could be located in the uploaded files index.`
-            });
-            continue;
           }
 
           // Step 2: Fetch detailed raw contents for candidate nodes
@@ -490,23 +513,23 @@ ${candidateDocsContent}
 
 AUDITING INSTRUCTIONS:
 Perform a strict column-by-column reconciliation:
-1. **Vendor Name**: Check if the vendor name in the transaction matches the vendor name in the supporting documents (use fuzzy matching, allow for abbreviations, case differences, etc.).
-2. **Amount**: Check if the amount in the transaction matches any amount in the supporting documents exactly or closely.
+1. **Vendor Name**: Check if the vendor/bank name matches (fuzzy).
+2. **Amount**: Check if the amount matches (check exact and decimal matches).
 3. **Date**: Verify if the transaction date corresponds to the document date.
-4. **Reference Numbers**: Reconcile invoice numbers or references.
+4. **Reference Numbers**: Reconcile account/invoice numbers or references.
 
 DETERMINE STATUS & CONFIDENCE:
-- If both the vendor name and amount match exactly/closely, and reference/date correlates → status: "matched", confidence: 0.95 to 1.0.
-- If the vendor matches but the amount differs, or if there is a partial mismatch → status: "mismatched", confidence: 0.5 to 0.8. Note both amounts.
-- If the details are conflicting or do not substantiate the transaction → status: "flagged", confidence: 0.0 to 0.4.
+- If vendor and amount match exactly/closely, and references correlate → status: "matched", confidence: 0.95 to 1.0.
+- If vendor matches but amount differs → status: "mismatched", confidence: 0.5 to 0.8.
+- If details are conflicting or missing → status: "flagged", confidence: 0.0 to 0.4.
 
-Return ONLY a raw JSON object matching the following structure. No markdown formatting, no conversational text.
+Return ONLY a raw JSON object matching the following structure. No markdown code blocks, no conversational text.
 {
-  "vendor": "<inferred vendor name>",
-  "amount_doc": <numeric amount from the support document, or 0 if not found>,
+  "vendor": "<inferred vendor>",
+  "amount_doc": <numeric amount or 0>,
   "confidence": <confidence score 0.0 to 1.0>,
   "status": "matched" | "mismatched" | "flagged",
-  "auditor_notes": "<highly detailed, professional audit note explaining the exact comparison of vendor, amount, date, and references. YOU MUST CITE the exact file name and page/sheet number where the evidence was found.>"
+  "auditor_notes": "<highly detailed, professional audit note explaining comparison and CITING exact filename & page.>"
 }`;
 
             const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
@@ -518,7 +541,7 @@ Return ONLY a raw JSON object matching the following structure. No markdown form
                 max_tokens: 800,
               });
             });
-            await sleep(300); // spacing delay to prevent hitting subsequent rate limits
+            await sleep(300); // rate limit padding spacing
 
             const auditText = auditResponse.choices[0].message.content.trim();
             const auditResult = parseRobustJSON(auditText);
@@ -555,22 +578,23 @@ Return ONLY a raw JSON object matching the following structure. No markdown form
           }
         }
 
-        // 5. Save Results to DB
+        // 4. Save Encrypted Results to DB
+        console.log(`Writing symmetrically encrypted audit results to vouching_results table...`);
         const resultsToInsert = finalVouchingResults.map(r => ({
           batch_id: dbBatchId,
-          txn_id: r.txn_id || 'UNKNOWN',
-          vendor: r.vendor || 'UNKNOWN',
-          amount_dump: r.amount_dump || 0,
-          amount_doc: r.amount_doc || 0,
-          confidence: r.confidence || 0,
-          status: r.status || 'flagged',
-          auditor_notes: r.auditor_notes
+          txn_id: encryptText(r.txn_id),
+          vendor: encryptText(r.vendor),
+          amount_dump: encryptText(r.amount_dump),
+          amount_doc: encryptText(r.amount_doc),
+          confidence: encryptText(r.confidence),
+          status: r.status, // Keep clear to enable frontend RLS filters and status counts
+          auditor_notes: encryptText(r.auditor_notes)
         }));
 
         await supabase.from('vouching_results').insert(resultsToInsert);
         await supabase.from('batches').update({ status: 'completed' }).eq('id', dbBatchId);
         
-        console.log(`Batch ${dbBatchId} completed successfully using PageIndex RAG!`);
+        console.log(`Secure batch ${dbBatchId} completed successfully using PageIndex RAG!`);
       } catch (err) {
         console.error(`Error processing batch ${dbBatchId}:`, err);
         try {
@@ -580,14 +604,178 @@ Return ONLY a raw JSON object matching the following structure. No markdown form
         }
       }
     }, 0);
-    
+
   } catch (error) {
     console.error('Server error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+// 3. Batches Listing API (with metadata decryption)
+app.get('/api/batches', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    let query = supabase.from('batches').select('*');
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+    const { data: rawBatches, error } = await query.order('created_at', { ascending: false });
+      
+    if (error) throw error;
+    
+    // Decrypt batch filenames
+    const decryptedBatches = (rawBatches || []).map(b => ({
+      ...b,
+      filename: decryptText(b.filename)
+    }));
+    
+    res.json(decryptedBatches);
+  } catch (err) {
+    console.error("Fetch batches error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Vouching Results Decryption & Retrieval API
+app.get('/api/batches/:id/results', async (req, res) => {
+  try {
+    const batchId = req.params.id;
+    const { data: encryptedResults, error } = await supabase
+      .from('vouching_results')
+      .select('*')
+      .eq('batch_id', batchId);
+      
+    if (error) throw error;
+    
+    // Decrypt all sensitive column fields
+    const decryptedResults = (encryptedResults || []).map(r => ({
+      id: r.id,
+      batch_id: r.batch_id,
+      txn_id: decryptText(r.txn_id),
+      vendor: decryptText(r.vendor),
+      amount_dump: Number(decryptText(r.amount_dump)) || 0,
+      amount_doc: Number(decryptText(r.amount_doc)) || 0,
+      confidence: Number(decryptText(r.confidence)) || 0,
+      status: r.status,
+      auditor_notes: decryptText(r.auditor_notes),
+      created_at: r.created_at
+    }));
+    
+    res.json(decryptedResults);
+  } catch (err) {
+    console.error("Fetch batch results error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Secure Decrypted Document Streaming Endpoint
+app.get('/api/batches/:id/document', async (req, res) => {
+  try {
+    const { path: filePath } = req.query;
+    if (!filePath) {
+      return res.status(400).json({ error: "Missing document path" });
+    }
+
+    // Fetch File Key & IV mapping from database
+    const { data: keyRow, error: kErr } = await supabase
+      .from('file_keys')
+      .select('wrapped_key, iv')
+      .eq('file_url', filePath)
+      .single();
+      
+    if (kErr || !keyRow) {
+      return res.status(404).json({ error: "File keys mapping not found for path: " + filePath });
+    }
+
+    const fileKey = unwrapKey(keyRow.wrapped_key);
+    const fileIv = keyRow.iv;
+
+    // Download encrypted blob from Supabase
+    const { data: blob, error: downloadError } = await supabase.storage
+      .from('uploads')
+      .download(filePath);
+      
+    if (downloadError || !blob) {
+      throw downloadError || new Error("Failed to download file blob");
+    }
+
+    // Decrypt buffer strictly in-memory
+    const encryptedBuf = Buffer.from(await blob.arrayBuffer());
+    const decryptedBuf = decryptBuffer(encryptedBuf, fileKey, fileIv);
+
+    // Determine appropriate Content-Type
+    const ext = filePath.split('.').pop().toLowerCase();
+    let contentType = 'application/octet-stream';
+    if (ext === 'pdf') {
+      contentType = 'application/pdf';
+    } else if (ext === 'png') {
+      contentType = 'image/png';
+    } else if (['jpg', 'jpeg'].includes(ext)) {
+      contentType = 'image/jpeg';
+    } else if (ext === 'xlsx') {
+      contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    } else if (ext === 'xls') {
+      contentType = 'application/vnd.ms-excel';
+    } else if (ext === 'csv') {
+      contentType = 'text/csv';
+    }
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', decryptedBuf.length);
+    res.send(decryptedBuf);
+
+  } catch (err) {
+    console.error("Stream document error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Manual Auditor Override Status & Notes Endpoint
+app.post('/api/results/:id/override', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, auditor_notes } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ error: "Missing status parameter" });
+    }
+
+    const updates = {};
+    updates.status = status;
+
+    if (auditor_notes !== undefined) {
+      updates.auditor_notes = encryptText(auditor_notes);
+    }
+
+    const { data, error } = await supabase
+      .from('vouching_results')
+      .update(updates)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      message: "Result overridden successfully",
+      result: {
+        ...data,
+        txn_id: decryptText(data.txn_id),
+        vendor: decryptText(data.vendor),
+        amount_dump: Number(decryptText(data.amount_dump)) || 0,
+        amount_doc: Number(decryptText(data.amount_doc)) || 0,
+        confidence: Number(decryptText(data.confidence)) || 0,
+        auditor_notes: decryptText(data.auditor_notes)
+      }
+    });
+
+  } catch (err) {
+    console.error("Override result error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`AI Processing Engine running on port ${PORT}`);
+  console.log(`AI Secure Zero-Trust Auditing Engine running on port ${PORT}`);
 });
