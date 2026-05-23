@@ -16,7 +16,7 @@ export default function ClientReports() {
     if (!session?.user?.id) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/batches?userId=${session.user.id}`);
+      const res = await fetch(`${API_URL}/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
       if (!res.ok) throw new Error("Failed to fetch reports");
       const data = await res.json();
       

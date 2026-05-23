@@ -63,8 +63,8 @@ export default function ClientDashboard() {
     if (!session?.user?.id) return;
     
     try {
-      // Fetch decrypted batches from Express server
-      const response = await fetch(`http://localhost:3000/api/batches?userId=${session.user.id}`);
+      // Fetch decrypted batches from Express server (with cache buster)
+      const response = await fetch(`http://localhost:3000/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch batches: ${response.statusText}`);
       }
