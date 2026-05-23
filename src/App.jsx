@@ -5,6 +5,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 
 // Pages
 import AuthPage from './pages/AuthPage';
+import LandingPage from './pages/LandingPage';
 import ClientDashboard from './pages/ClientDashboard';
 import DocumentUpload from './pages/DocumentUpload';
 import ClientReports from './pages/ClientReports';
@@ -16,8 +17,8 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<AuthPage />} />
-        
-        <Route path="/" element={<AppLayout />}>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/app" element={<AppLayout />}>
           {/* User Routes - Protected */}
           <Route element={<ProtectedRoute allowedRoles={['user', 'admin']} />}>
             <Route path="user/dashboard" element={<ClientDashboard />} />
@@ -37,8 +38,7 @@ function App() {
             <Route path="admin/users" element={<div><div className="page-header"><h1>User Management</h1></div></div>} />
           </Route>
 
-          {/* Default Route */}
-          <Route path="" element={<Navigate to="/login" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>

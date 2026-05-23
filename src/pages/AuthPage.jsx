@@ -26,8 +26,8 @@ export default function AuthPage() {
       if (isLogin) {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        // On success, App.jsx/ProtectedRoute handles redirection based on role
-        navigate('/user/dashboard'); // Fallback, ProtectedRoute will redirect properly if needed
+        // On success, navigate to protected dashboard under /app
+        navigate('/app/user/dashboard');
       } else {
         if (password !== confirmPassword) {
           throw new Error("Passwords do not match");
