@@ -45,7 +45,7 @@ export default function AuthPage() {
         if (error) throw error;
         
         if (data.session) {
-           navigate('/user/dashboard');
+           navigate('/app/user/dashboard');
         } else {
            setSuccessMsg('Account created successfully! Check your email for the confirmation link if required, otherwise you can sign in.');
            setIsLogin(true);

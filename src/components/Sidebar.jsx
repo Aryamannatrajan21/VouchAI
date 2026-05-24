@@ -11,18 +11,18 @@ export default function Sidebar() {
 
   const links = {
     user: [
-      { to: '/user/dashboard', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
-      { to: '/user/upload', icon: <Upload size={20} />, label: 'Upload' },
-      { to: '/user/reports', icon: <FileText size={20} />, label: 'Reports' },
+      { to: '/app/user/dashboard', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
+      { to: '/app/user/upload', icon: <Upload size={20} />, label: 'Upload' },
+      { to: '/app/user/reports', icon: <FileText size={20} />, label: 'Reports' },
     ],
     auditor: [
-      { to: '/auditor/dashboard', icon: <CheckCircle size={20} />, label: 'Review Queue' },
-      { to: '/auditor/reports', icon: <FileText size={20} />, label: 'Reports' },
+      { to: '/app/auditor/dashboard', icon: <CheckCircle size={20} />, label: 'Review Queue' },
+      { to: '/app/auditor/reports', icon: <FileText size={20} />, label: 'Reports' },
     ],
     admin: [
-      { to: '/admin/dashboard', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
-      { to: '/admin/users', icon: <Users size={20} />, label: 'User Management' },
-      { to: '/admin/logs', icon: <Settings size={20} />, label: 'System Logs' },
+      { to: '/app/admin/dashboard', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
+      { to: '/app/admin/users', icon: <Users size={20} />, label: 'User Management' },
+      { to: '/app/admin/logs', icon: <Settings size={20} />, label: 'System Logs' },
     ]
   };
 
