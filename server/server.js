@@ -280,7 +280,7 @@ function normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes) {
     : computedConfidence;
 
   return {
-    txn_id: String(auditResult.transaction_id || (txn[txnIdKey] ?? 'UNKNOWN')),
+    txn_id: String(txn[txnIdKey] || auditResult.transaction_id || 'UNKNOWN'),
     vendor: auditResult.vendor || txn[allHeaders[1]] || 'UNKNOWN',
     amount_dump: Number(txn[amountKey]) || 0,
     amount_doc: Number(auditResult.amount_doc) || 0,
