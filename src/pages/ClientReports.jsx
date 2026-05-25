@@ -53,35 +53,37 @@ export default function ClientReports() {
         
         let mailAmountVal = '';
         if (mailMatches.length > 0) {
-          const candidates = mailMatches.filter(item => {
-            const valStr = String(item.evidence_value || '').trim();
-            // Regex matches numbers, commas, decimals, and rejects strings with words or dates
-            return /^[A-Z]{0,3}\s*[\d,]+(?:\.\d+)?\s*$/i.test(valStr) && !valStr.includes('-');
-          });
-          
-          if (candidates.length > 0) {
-            const targetAmt = row.amount_doc || row.amount_dump || 0;
-            let bestMatch = candidates[0];
-            let minDiff = Infinity;
-            
-            candidates.forEach(cand => {
-              const valNum = Number(String(cand.evidence_value).replace(/[^0-9.]/g, '')) || 0;
-              const diff = Math.abs(valNum - targetAmt);
-              if (diff < minDiff) {
-                minDiff = diff;
-                bestMatch = cand;
+          const targetAmt = row.amount_doc || row.amount_dump || 0;
+          if (targetAmt > 0) {
+            for (const item of mailMatches) {
+              const valStr = String(item.evidence_value || '');
+              const matches = valStr.match(/[\d,]+(?:\.\d+)?/g) || [];
+              for (const match of matches) {
+                const cleanVal = Number(match.replace(/,/g, ''));
+                if (!isNaN(cleanVal) && cleanVal > 0) {
+                  const ratio = cleanVal / targetAmt;
+                  if (ratio > 0.95 && ratio < 1.05) {
+                    mailAmountVal = cleanVal;
+                    break;
+                  }
+                }
               }
-            });
-            
-            const rawVal = String(bestMatch.evidence_value || '');
-            const cleanNum = Number(rawVal.replace(/[^0-9.]/g, ''));
-            mailAmountVal = !isNaN(cleanNum) && cleanNum > 0 ? cleanNum : rawVal;
+              if (mailAmountVal) break;
+            }
           }
         }
         
-        if (!mailAmountVal) {
-          const hasMailSupport = (row.evidence_files || []).some(f => f.toLowerCase().includes('mail') || f.toLowerCase().includes('approval') || f.toLowerCase().includes('req'));
-          mailAmountVal = hasMailSupport ? 'Matched in Mail' : 'N/A';
+        const hasMailSupport = (row.evidence_files || []).some(f => f.toLowerCase().includes('mail') || f.toLowerCase().includes('approval') || f.toLowerCase().includes('req'));
+        let mailColumnText = '';
+        if (hasMailSupport) {
+          if (mailAmountVal) {
+            const formattedAmt = typeof mailAmountVal === 'number' ? mailAmountVal.toLocaleString('en-US') : mailAmountVal;
+            mailColumnText = `Matched in Mail (${formattedAmt})`;
+          } else {
+            mailColumnText = 'Matched in Mail';
+          }
+        } else {
+          mailColumnText = 'No supporting email found';
         }
 
         return [
@@ -89,7 +91,7 @@ export default function ClientReports() {
           row.vendor || '',
           row.amount_dump || 0,
           row.amount_doc || 0,
-          mailAmountVal,
+          mailColumnText,
           Math.round((row.confidence || 0) * 100),
           (row.status || '').toUpperCase(),
           (row.reference_numbers || []).join(', '),
