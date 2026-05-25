@@ -1032,6 +1032,10 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`AI Secure Zero-Trust Auditing Engine running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`AI Secure Zero-Trust Auditing Engine running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
