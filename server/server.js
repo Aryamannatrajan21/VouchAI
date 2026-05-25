@@ -516,6 +516,7 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
     const runProcessing = async () => {
       try {
         console.log(`Starting secure decrypted AI processing for batch ${dbBatchId}...`);
+        const xlsx = require('xlsx');
         const isTurbo = processingMode === '8b';
 
         // 1. Download and Decrypt Transaction Excel Dump in-memory
