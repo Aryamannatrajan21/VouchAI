@@ -279,18 +279,40 @@ export default function ClientDashboard() {
       const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Mail Amount', 'Confidence (%)', 'Status', 'Reference Numbers', 'Evidence Files', 'Parameter Matches', 'Auditor Notes'];
 
       const rows = data.map(row => {
-        const mailMatch = (row.match_details || []).find(item => {
+        const mailMatches = (row.match_details || []).filter(item => {
           const paramLower = (item.parameter || '').toLowerCase();
-          return (paramLower.includes('mail') || paramLower.includes('email') || paramLower.includes('approval')) && 
-                 (paramLower.includes('amount') || paramLower.includes('value') || paramLower.includes('principal'));
+          return paramLower.includes('mail') || paramLower.includes('email') || paramLower.includes('approval') || paramLower.includes('fdr');
         });
         
         let mailAmountVal = '';
-        if (mailMatch) {
-          const rawVal = String(mailMatch.evidence_value || '');
-          const cleanNum = Number(rawVal.replace(/[^0-9.]/g, ''));
-          mailAmountVal = !isNaN(cleanNum) && cleanNum > 0 ? cleanNum : rawVal;
-        } else {
+        if (mailMatches.length > 0) {
+          const candidates = mailMatches.filter(item => {
+            const valStr = String(item.evidence_value || '').trim();
+            // Regex matches numbers, commas, decimals, and rejects strings with words or dates
+            return /^[A-Z]{0,3}\s*[\d,]+(?:\.\d+)?\s*$/i.test(valStr) && !valStr.includes('-');
+          });
+          
+          if (candidates.length > 0) {
+            const targetAmt = row.amount_doc || row.amount_dump || 0;
+            let bestMatch = candidates[0];
+            let minDiff = Infinity;
+            
+            candidates.forEach(cand => {
+              const valNum = Number(String(cand.evidence_value).replace(/[^0-9.]/g, '')) || 0;
+              const diff = Math.abs(valNum - targetAmt);
+              if (diff < minDiff) {
+                minDiff = diff;
+                bestMatch = cand;
+              }
+            });
+            
+            const rawVal = String(bestMatch.evidence_value || '');
+            const cleanNum = Number(rawVal.replace(/[^0-9.]/g, ''));
+            mailAmountVal = !isNaN(cleanNum) && cleanNum > 0 ? cleanNum : rawVal;
+          }
+        }
+        
+        if (!mailAmountVal) {
           const hasMailSupport = (row.evidence_files || []).some(f => f.toLowerCase().includes('mail') || f.toLowerCase().includes('approval') || f.toLowerCase().includes('req'));
           mailAmountVal = hasMailSupport ? 'Matched in Mail' : 'N/A';
         }
