@@ -3,10 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
-const { PDFParse } = require('pdf-parse');
-const xlsx = require('xlsx');
-
-global.WebSocket = require('ws');
+// pdf-parse and xlsx are lazy-loaded inside functions to avoid filesystem errors in Vercel serverless
 
 const { encryptText, decryptText, wrapKey, unwrapKey, generateSecureKeyIV, decryptBuffer } = require('./crypto_helper');
 
@@ -40,9 +37,14 @@ app.use(cors({
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 
 // Set up Supabase admin client (bypasses RLS so the AI engine can write results)
+// Node 20 requires explicit ws transport for Supabase realtime
+const ws = require('ws');
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // Requires Service Role Key
+  process.env.SUPABASE_SERVICE_ROLE_KEY, // Requires Service Role Key
+  {
+    realtime: { transport: ws }
+  }
 );
 
 // Set up Nvidia OpenAI Client
@@ -301,31 +303,37 @@ function parseEncryptedJSONField(value, fallback) {
   }
 }
 
-// Helper: Parse PDF page by page using PDFParse class
+// Helper: Parse PDF page by page using pdf-parse (lazy-loaded to avoid Vercel startup crash)
 async function parsePDFPages(buffer) {
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  await parser.destroy();
-  
-  if (!result.pages || result.pages.length === 0) {
-    return [{
+  const pdfParse = require('pdf-parse');
+  const result = await pdfParse(buffer);
+  const fullText = result.text || '';
+  const numPages = result.numpages || 1;
+
+  // Split text roughly by page count
+  const chunkSize = Math.ceil(fullText.length / numPages);
+  const pages = [];
+  for (let i = 0; i < numPages; i++) {
+    const pageText = fullText.substring(i * chunkSize, (i + 1) * chunkSize);
+    pages.push({
       nodeType: 'page',
-      identifier: 'Page 1',
-      rawText: result.text || '',
-      textPreview: (result.text || '').substring(0, 1500)
-    }];
+      identifier: `Page ${i + 1}`,
+      rawText: pageText,
+      textPreview: pageText.substring(0, 1500)
+    });
   }
-  
-  return result.pages.map(page => ({
+  return pages.length > 0 ? pages : [{
     nodeType: 'page',
-    identifier: `Page ${page.num}`,
-    rawText: page.text || '',
-    textPreview: (page.text || '').substring(0, 1500)
-  }));
+    identifier: 'Page 1',
+    rawText: fullText,
+    textPreview: fullText.substring(0, 1500)
+  }];
 }
 
-// Helper: Parse Excel worksheets into nodes
+
+// Helper: Parse Excel worksheets into nodes (lazy-loaded to avoid Vercel startup crash)
 async function parseExcelSheets(buffer) {
+  const xlsx = require('xlsx');
   const wb = xlsx.read(buffer, { type: 'buffer' });
   const sheets = [];
   for (const sName of wb.SheetNames) {
