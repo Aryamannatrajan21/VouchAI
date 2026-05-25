@@ -762,7 +762,7 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
   "auditor_notes": "<CA-style conclusion citing exact files, sections, IDs/reference numbers, and unresolved issues.>"
 }`;
 
-            const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
+            const modelName = "meta/llama-3.1-8b-instruct";
             const auditResponse = await retryOpenAICall(async () => {
               return await openai.chat.completions.create({
                 model: modelName,
