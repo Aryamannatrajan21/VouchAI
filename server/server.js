@@ -398,8 +398,14 @@ Return ONLY a raw JSON object with these exact keys. No conversational prefixes,
   }
 }
 
+// Health check (no auth required) - use to verify Vercel function is running
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, env: !!process.env.SUPABASE_URL, ts: Date.now() });
+});
+
 // 1. Secure Upload Preparation Endpoint
 app.post('/api/prepare-upload', requireAuth, async (req, res) => {
+
   try {
     const { filename, mimeType, clientId } = req.body;
     if (!filename || !clientId) {
