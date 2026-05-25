@@ -305,29 +305,26 @@ function parseEncryptedJSONField(value, fallback) {
 
 // Helper: Parse PDF page by page using pdf-parse (lazy-loaded to avoid Vercel startup crash)
 async function parsePDFPages(buffer) {
-  const pdfParse = require('pdf-parse');
-  const result = await pdfParse(buffer);
-  const fullText = result.text || '';
-  const numPages = result.numpages || 1;
-
-  // Split text roughly by page count
-  const chunkSize = Math.ceil(fullText.length / numPages);
-  const pages = [];
-  for (let i = 0; i < numPages; i++) {
-    const pageText = fullText.substring(i * chunkSize, (i + 1) * chunkSize);
-    pages.push({
+  const { PDFParse } = require('pdf-parse');
+  const uint8 = new Uint8Array(buffer);
+  const pdf = new PDFParse(uint8);
+  const result = await pdf.getText();
+  
+  if (!result.pages || result.pages.length === 0) {
+    return [{
       nodeType: 'page',
-      identifier: `Page ${i + 1}`,
-      rawText: pageText,
-      textPreview: pageText.substring(0, 1500)
-    });
+      identifier: 'Page 1',
+      rawText: result.text || '',
+      textPreview: (result.text || '').substring(0, 1500)
+    }];
   }
-  return pages.length > 0 ? pages : [{
+
+  return result.pages.map(p => ({
     nodeType: 'page',
-    identifier: 'Page 1',
-    rawText: fullText,
-    textPreview: fullText.substring(0, 1500)
-  }];
+    identifier: `Page ${p.num}`,
+    rawText: p.text || '',
+    textPreview: (p.text || '').substring(0, 1500)
+  }));
 }
 
 
