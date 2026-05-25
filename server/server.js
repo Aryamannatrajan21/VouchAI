@@ -593,15 +593,21 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
           }
         }
 
-        // Generate metadata summaries in parallel with concurrency control (e.g. 8 at a time) to prevent timeouts
-        console.log(`Indexing ${supportNodes.length} decrypted document pages/sheets using Llama 3.1 8B in parallel...`);
-        const concurrency = 8;
-        for (let i = 0; i < supportNodes.length; i += concurrency) {
-          const chunk = supportNodes.slice(i, i + concurrency);
-          await Promise.all(chunk.map(async (node) => {
+        // Generate metadata summaries with smart file-level caching to prevent rate limits and timeouts
+        console.log(`Indexing ${supportNodes.length} decrypted document pages/sheets using Llama 3.1 8B with file-level caching...`);
+        const fileMetadataCache = {};
+        for (let i = 0; i < supportNodes.length; i++) {
+          const node = supportNodes[i];
+          const cacheKey = node.fileName;
+          
+          if (fileMetadataCache[cacheKey]) {
+            node.metadata = fileMetadataCache[cacheKey];
+          } else {
+            console.log(`Generating fresh metadata for unique file: ${cacheKey} (using ${node.identifier})`);
             node.metadata = await generateNodeMetadata(node);
-          }));
-          await sleep(200); // 200ms padding between concurrent batches
+            fileMetadataCache[cacheKey] = node.metadata;
+            await sleep(400); // 400ms delay between unique files to avoid rate limits
+          }
         }
 
         const pageTreeIndex = supportNodes.map((node, index) => ({
