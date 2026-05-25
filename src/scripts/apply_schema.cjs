@@ -3,14 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const client = new Client({
-  host: 'db.ggzltbymirqpqkkollnc.supabase.co',
-  port: 5432,
-  user: 'postgres',
-  password: 'TPwuSbskuQ6yGKeo',
-  database: 'postgres',
-  ssl: {
-    rejectUnauthorized: false
-  }
+  connectionString: process.env.SUPABASE_DB_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
 const sqlFile = path.join(__dirname, '../../supabase/migrations/20260516000000_initial_schema.sql');

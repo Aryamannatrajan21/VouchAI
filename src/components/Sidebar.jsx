@@ -1,14 +1,9 @@
 import React from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Upload, FileText, Settings, Users, LogOut, CheckCircle } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 
-export default function Sidebar() {
-  const location = useLocation();
-  const path = location.pathname;
-
-  // Basic role determination
-  const role = path.includes('admin') ? 'admin' : path.includes('auditor') ? 'auditor' : 'user';
-
+export default function Sidebar({ role = 'user' }) {
   const links = {
     user: [
       { to: '/app/user/dashboard', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
@@ -49,8 +44,8 @@ export default function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <NavLink to="/login" className="nav-link text-muted" onClick={() => {
-          // Add logout logic here later
+        <NavLink to="/login" className="nav-link text-muted" onClick={async () => {
+          await supabase.auth.signOut();
         }}>
           <LogOut size={20} />
           <span>Logout</span>

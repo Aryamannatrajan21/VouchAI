@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useOutletContext } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import { supabase } from '../lib/supabase';
 
 export default function AppLayout() {
+  const { session, role } = useOutletContext();
   const [profileName, setProfileName] = useState('');
 
   useEffect(() => {
@@ -27,7 +28,7 @@ export default function AppLayout() {
 
   return (
     <div className="app-container">
-      <Sidebar />
+      <Sidebar role={role} />
       <main className="main-content">
         <div className="top-nav glass-panel">
           <div className="user-profile">
@@ -36,7 +37,7 @@ export default function AppLayout() {
           </div>
         </div>
         <div className="content-scroll">
-          <Outlet />
+          <Outlet context={{ session, role }} />
         </div>
       </main>
     </div>

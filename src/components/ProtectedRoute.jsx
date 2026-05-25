@@ -8,8 +8,11 @@ export default function ProtectedRoute({ allowedRoles }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true;
+
     const fetchSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
+      if (!isMounted) return;
       setSession(session);
 
       if (session) {
@@ -19,10 +22,10 @@ export default function ProtectedRoute({ allowedRoles }) {
           .select('role')
           .eq('id', session.user.id)
           .single();
-        
+        if (!isMounted) return;
         setRole(profile?.role || 'user');
       }
-      setLoading(false);
+      if (isMounted) setLoading(false);
     };
 
     fetchSession();
@@ -32,7 +35,10 @@ export default function ProtectedRoute({ allowedRoles }) {
       // We could re-fetch role here if needed, but usually redirect happens
     });
 
-    return () => authListener.subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      authListener.subscription.unsubscribe();
+    };
   }, []);
 
   if (loading) {
@@ -45,7 +51,7 @@ export default function ProtectedRoute({ allowedRoles }) {
 
   if (allowedRoles && !allowedRoles.includes(role)) {
     // If user is logged in but doesn't have the right role, send to their respective dashboard
-    return <Navigate to={`/${role}/dashboard`} replace />;
+    return <Navigate to={`/app/${role}/dashboard`} replace />;
   }
 
   return <Outlet context={{ session, role }} />;

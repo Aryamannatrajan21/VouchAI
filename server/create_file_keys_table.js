@@ -1,11 +1,7 @@
 const { Client } = require('pg');
 
 const client = new Client({
-  host: 'db.ggzltbymirqpqkkollnc.supabase.co',
-  port: 5432,
-  user: 'postgres',
-  password: 'TPwuSbskuQ6yGKeo',
-  database: 'postgres',
+  connectionString: process.env.SUPABASE_DB_URL,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -25,13 +21,9 @@ async function run() {
       -- 2. Enable row level security
       ALTER TABLE public.file_keys ENABLE ROW LEVEL SECURITY;
 
-      -- 3. Drop existing policies if they exist
+      -- 3. Drop permissive policies if they exist. The service role bypasses RLS.
       DROP POLICY IF EXISTS "Allow select for everyone on file_keys" ON public.file_keys;
       DROP POLICY IF EXISTS "Allow insert for everyone on file_keys" ON public.file_keys;
-
-      -- 4. Create policies to allow inserts and select for authenticated sessions
-      CREATE POLICY "Allow select for everyone on file_keys" ON public.file_keys FOR SELECT USING (true);
-      CREATE POLICY "Allow insert for everyone on file_keys" ON public.file_keys FOR INSERT WITH CHECK (true);
     `;
     await client.query(sql);
     console.log('Successfully created public.file_keys table with secure RLS policies!');

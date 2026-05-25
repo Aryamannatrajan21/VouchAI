@@ -107,15 +107,13 @@ function parseRobustJSON(text) {
     return JSON.parse(jsonStr);
   } catch (e) {
     try {
-      // Strip out single-line and multi-line comments
-      let cleanJS = jsonStr.replace(/\/\/.*?\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
-      return Function(`return (${cleanJS});`)();
+      const cleanJSON = jsonStr
+        .replace(/\/\/.*?\n/g, '\n')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/,\s*([}\]])/g, '$1');
+      return JSON.parse(cleanJSON);
     } catch (innerErr) {
-      try {
-        return eval(`(${jsonStr})`);
-      } catch (evalErr) {
-        throw e; // Throw original JSON.parse error if both fail
-      }
+      throw e; // Throw original JSON.parse error if repair fails
     }
   }
 }

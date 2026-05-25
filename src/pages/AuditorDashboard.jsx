@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, Check, X, Search, MessageSquare } from 'lucide-react';
+import { Check, X, Search, MessageSquare } from 'lucide-react';
 
 export default function AuditorDashboard() {
   return (

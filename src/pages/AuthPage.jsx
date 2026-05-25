@@ -3,6 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { Lock, Mail, User, Eye, EyeOff } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
+function dashboardForRole(role) {
+  if (role === 'admin') return '/app/admin/dashboard';
+  if (role === 'auditor') return '/app/auditor/dashboard';
+  return '/app/user/dashboard';
+}
+
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [name, setName] = useState('');
@@ -24,10 +30,14 @@ export default function AuthPage() {
 
     try {
       if (isLogin) {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        // On success, navigate to protected dashboard under /app
-        navigate('/app/user/dashboard');
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', data.user.id)
+          .single();
+        navigate(dashboardForRole(profile?.role || 'user'));
       } else {
         if (password !== confirmPassword) {
           throw new Error("Passwords do not match");

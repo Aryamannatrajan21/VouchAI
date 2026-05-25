@@ -2,10 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { 
   CheckCircle, AlertTriangle, Clock, User, Download, Trash2, 
-  Search, Eye, ArrowLeft, ExternalLink, FileText, Check, X, 
-  ChevronRight, RefreshCw, Layers 
+  Search, Eye, ArrowLeft, FileText, Check, X, 
+  RefreshCw, Layers 
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { apiFetch } from '../lib/api';
 import * as XLSX from 'xlsx';
 
 export default function ClientDashboard() {
@@ -24,6 +25,7 @@ export default function ClientDashboard() {
   const [selectedDocPath, setSelectedDocPath] = useState('');
   const [docLoading, setDocLoading] = useState(false);
   const [excelData, setExcelData] = useState(null);
+  const [documentObjectUrl, setDocumentObjectUrl] = useState('');
   const [activeSheet, setActiveSheet] = useState('');
   const [overrideNote, setOverrideNote] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
@@ -48,23 +50,12 @@ export default function ClientDashboard() {
     fetchProfile();
   }, [session]);
 
-  const decryptText = (ciphertext) => {
-    // Basic local fallback client decrypt if needed, but the server handles actual DB decryption.
-    // If it is in the hex format, we display a placeholder filename or try to clean it.
-    if (!ciphertext) return ciphertext;
-    if (ciphertext.includes(':')) {
-      // In a real env we query decrypted API. For documents filename we will decrypt using backend
-      return ciphertext.split(':').pop().substring(0, 15) + '... (Encrypted)';
-    }
-    return ciphertext;
-  };
-
   const fetchData = async () => {
     if (!session?.user?.id) return;
     
     try {
       // Fetch decrypted batches from Express server (with cache buster)
-      const response = await fetch(`http://localhost:3000/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
+      const response = await apiFetch(`/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch batches: ${response.statusText}`);
       }
@@ -110,12 +101,20 @@ export default function ClientDashboard() {
     return () => clearInterval(interval);
   }, [session]);
 
+  useEffect(() => {
+    return () => {
+      if (documentObjectUrl) {
+        URL.revokeObjectURL(documentObjectUrl);
+      }
+    };
+  }, [documentObjectUrl]);
+
   const launchDataSnipper = async (batch) => {
     setSelectedBatchForSnipper(batch);
     setLoading(true);
     try {
       // 1. Fetch decrypted results for this batch
-      const resultsRes = await fetch(`http://localhost:3000/api/batches/${batch.id}/results`);
+      const resultsRes = await apiFetch(`/api/batches/${batch.id}/results`);
       if (!resultsRes.ok) throw new Error("Failed to fetch batch results");
       const results = await resultsRes.json();
       setSnipperResults(results);
@@ -182,18 +181,21 @@ export default function ClientDashboard() {
   const loadDocument = async (fileUrl, batchActive) => {
     setSelectedDocPath(fileUrl);
     setExcelData(null);
+    if (documentObjectUrl) {
+      URL.revokeObjectURL(documentObjectUrl);
+      setDocumentObjectUrl('');
+    }
     setActiveSheet('');
     
     const targetBatch = batchActive || selectedBatchForSnipper;
     if (!targetBatch) return;
 
     const ext = fileUrl.split('.').pop().toLowerCase();
+    setDocLoading(true);
     if (['xlsx', 'xls', 'csv'].includes(ext)) {
-      setDocLoading(true);
       setActiveTab('sheet');
       try {
-        const streamUrl = `http://localhost:3000/api/batches/${targetBatch.id}/document?path=${encodeURIComponent(fileUrl)}`;
-        const res = await fetch(streamUrl);
+        const res = await apiFetch(`/api/batches/${targetBatch.id}/document?path=${encodeURIComponent(fileUrl)}`);
         if (!res.ok) throw new Error("Failed to fetch decrypted document bytes");
         
         const arrBuf = await res.arrayBuffer();
@@ -214,6 +216,16 @@ export default function ClientDashboard() {
       }
     } else {
       setActiveTab('doc');
+      try {
+        const res = await apiFetch(`/api/batches/${targetBatch.id}/document?path=${encodeURIComponent(fileUrl)}`);
+        if (!res.ok) throw new Error("Failed to fetch decrypted document bytes");
+        const blob = await res.blob();
+        setDocumentObjectUrl(URL.createObjectURL(blob));
+      } catch (err) {
+        console.error("Failed to load document preview:", err);
+      } finally {
+        setDocLoading(false);
+      }
     }
   };
 
@@ -221,9 +233,8 @@ export default function ClientDashboard() {
     if (!activeResult) return;
     setActionLoading(true);
     try {
-      const res = await fetch(`http://localhost:3000/api/results/${activeResult.id}/override`, {
+      const res = await apiFetch(`/api/results/${activeResult.id}/override`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status,
           auditor_notes: overrideNote
@@ -253,7 +264,7 @@ export default function ClientDashboard() {
 
   const downloadReport = async (batchId, filename) => {
     try {
-      const response = await fetch(`http://localhost:3000/api/batches/${batchId}/results`);
+      const response = await apiFetch(`/api/batches/${batchId}/results`);
       if (!response.ok) {
         throw new Error(`Failed to fetch results: ${response.statusText}`);
       }
@@ -265,7 +276,7 @@ export default function ClientDashboard() {
       }
 
       // Build Excel workbook
-      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Auditor Notes'];
+      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Reference Numbers', 'Evidence Files', 'Parameter Matches', 'Auditor Notes'];
 
       const rows = data.map(row => ([
         row.txn_id || '',
@@ -274,6 +285,9 @@ export default function ClientDashboard() {
         row.amount_doc || 0,
         Math.round((row.confidence || 0) * 100),
         (row.status || '').toUpperCase(),
+        (row.reference_numbers || []).join(', '),
+        (row.evidence_files || []).join('; '),
+        (row.match_details || []).map(item => `${item.parameter}: ${item.status} (dump=${item.dump_value || ''}; evidence=${item.evidence_value || ''}; source=${item.source_file || ''} ${item.source_section || ''})`).join('\n'),
         row.auditor_notes || ''
       ]));
 
@@ -288,6 +302,9 @@ export default function ClientDashboard() {
         { wch: 16 },  // Doc Amount
         { wch: 16 },  // Confidence
         { wch: 14 },  // Status
+        { wch: 28 },  // Reference Numbers
+        { wch: 45 },  // Evidence Files
+        { wch: 80 },  // Parameter Matches
         { wch: 55 },  // Auditor Notes
       ];
 
@@ -337,10 +354,6 @@ export default function ClientDashboard() {
       if (snipperFilter === 'flagged') return r.status === 'flagged' || r.status === 'mismatched';
       return true;
     });
-
-    const decryptedStreamUrl = selectedDocPath 
-      ? `http://localhost:3000/api/batches/${selectedBatchForSnipper.id}/document?path=${encodeURIComponent(selectedDocPath)}`
-      : '';
 
     return (
       <div className="flex flex-col h-full" style={{ overflow: 'hidden', paddingRight: '0.5rem', paddingBottom: '1rem' }}>
@@ -534,9 +547,9 @@ export default function ClientDashboard() {
                     </table>
                   </div>
                 </div>
-              ) : decryptedStreamUrl ? (
+              ) : documentObjectUrl ? (
                 <iframe 
-                  src={decryptedStreamUrl} 
+                  src={documentObjectUrl} 
                   title="Document Preview" 
                   style={{ width: '100%', height: '100%', border: 'none', borderRadius: '8px', backgroundColor: 'white' }} 
                 />
@@ -571,6 +584,14 @@ export default function ClientDashboard() {
                         <span className={`status-badge ${activeResult.status === 'matched' ? 'status-success' : 'status-danger'}`} style={{ padding: '0.05rem 0.3rem', fontSize: '0.6rem' }}>
                           {activeResult.status.toUpperCase()}
                         </span>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.35rem 0.5rem', borderRadius: '6px' }}>
+                        <span className="text-muted" style={{ display: 'block', fontSize: '0.6rem' }}>Reference IDs Used</span>
+                        <span style={{ fontWeight: 500 }}>{(activeResult.reference_numbers || []).join(', ') || 'Not identified'}</span>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.35rem 0.5rem', borderRadius: '6px' }}>
+                        <span className="text-muted" style={{ display: 'block', fontSize: '0.6rem' }}>Evidence Files</span>
+                        <span style={{ fontWeight: 500 }}>{(activeResult.evidence_files || []).join('; ') || 'Not identified'}</span>
                       </div>
                     </div>
                   </div>
@@ -609,6 +630,32 @@ export default function ClientDashboard() {
                 
                 {/* Notes Actions */}
                 <div style={{ marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                  {activeResult.match_details?.length > 0 && (
+                    <div style={{ maxHeight: '120px', overflow: 'auto', marginBottom: '0.6rem', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px' }}>
+                      <table style={{ width: '100%', fontSize: '0.65rem' }}>
+                        <thead>
+                          <tr>
+                            <th>Parameter</th>
+                            <th>Dump</th>
+                            <th>Evidence</th>
+                            <th>Status</th>
+                            <th>Source</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {activeResult.match_details.map((item, index) => (
+                            <tr key={`${item.parameter}-${index}`}>
+                              <td>{item.parameter}</td>
+                              <td>{String(item.dump_value || '')}</td>
+                              <td>{String(item.evidence_value || '')}</td>
+                              <td>{item.status}</td>
+                              <td>{[item.source_file, item.source_section].filter(Boolean).join(' - ')}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                   <label className="input-label" style={{ fontSize: '0.65rem', marginBottom: '0.2rem' }}>Reconciliation Evidence Notes</label>
                   <textarea 
                     className="input-field" 

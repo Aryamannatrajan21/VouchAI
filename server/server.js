@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
-const multer = require('multer');
 const { PDFParse } = require('pdf-parse');
 const xlsx = require('xlsx');
 
@@ -12,8 +11,37 @@ global.WebSocket = require('ws');
 const { encryptText, decryptText, wrapKey, unwrapKey, generateSecureKeyIV, decryptBuffer } = require('./crypto_helper');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+const requiredEnv = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'NVIDIA_API_KEY', 'ENCRYPTION_SECRET'];
+const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+if (missingEnv.length > 0) {
+  throw new Error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+}
+
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.set('trust proxy', 1);
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error('Origin not allowed by CORS'));
+  },
+  credentials: true
+}));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 
 // Set up Supabase admin client (bypasses RLS so the AI engine can write results)
 const supabase = createClient(
@@ -29,6 +57,78 @@ const openai = new OpenAI({
 
 // Helper: Sleep utility
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function getBearerToken(req) {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+  if (scheme !== 'Bearer' || !token) return null;
+  return token;
+}
+
+async function requireAuth(req, res, next) {
+  try {
+    const token = getBearerToken(req);
+    if (!token) {
+      return res.status(401).json({ error: 'Missing bearer token' });
+    }
+
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data?.user) {
+      return res.status(401).json({ error: 'Invalid bearer token' });
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', data.user.id)
+      .single();
+
+    req.auth = {
+      user: data.user,
+      role: profile?.role || 'user'
+    };
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+function canAccessUser(req, userId) {
+  return req.auth?.user?.id === userId || ['admin', 'auditor'].includes(req.auth?.role);
+}
+
+async function getBatchForAccess(batchId) {
+  const { data, error } = await supabase
+    .from('batches')
+    .select('id, user_id, file_url')
+    .eq('id', batchId)
+    .single();
+  if (error || !data) return null;
+  return data;
+}
+
+async function requireBatchAccess(req, res, next) {
+  try {
+    const batch = await getBatchForAccess(req.params.id);
+    if (!batch) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+    if (!canAccessUser(req, batch.user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    req.batch = batch;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+function sanitizeStorageFilename(filename) {
+  return String(filename || '')
+    .replace(/[/\\]/g, '_')
+    .replace(/[^\w.\- ()]/g, '_')
+    .slice(0, 180);
+}
 
 // Helper: Robustly retry API calls on 429 Rate Limits with Exponential Backoff
 async function retryOpenAICall(fn, retries = 5, delay = 2000) {
@@ -114,17 +214,20 @@ function parseRobustJSON(text) {
     return JSON.parse(jsonStr);
   } catch (e) {
     try {
-      let cleanJS = jsonStr.replace(/\/\/.*?\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
-      return Function(`return (${cleanJS});`)();
+      const cleanJSON = jsonStr
+        .replace(/\/\/.*?\n/g, '\n')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/,\s*([}\]])/g, '$1');
+      return JSON.parse(cleanJSON);
     } catch (innerErr) {
-      try {
-        return eval(`(${jsonStr})`);
-      } catch (evalErr) {
-        throw e;
-      }
+      throw e;
     }
   }
 }
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
 
 // Helper: convert an array of objects into a clean markdown table string
 function toMarkdownTable(rows) {
@@ -134,6 +237,72 @@ function toMarkdownTable(rows) {
   const headerRow = headers.join(' | ');
   const dataRows = rows.map(r => headers.map(h => String(r[h] ?? '')).join(' | '));
   return [headerRow, divider, ...dataRows].join('\n');
+}
+
+function normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes) {
+  const keys = Object.keys(txn);
+  const txnIdKey = keys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('ref') || k.toLowerCase().includes('no')) || keys[0];
+  const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
+
+  const parameterMatches = Array.isArray(auditResult.parameter_matches)
+    ? auditResult.parameter_matches.map((item) => ({
+        parameter: String(item.parameter || ''),
+        dump_value: item.dump_value ?? '',
+        evidence_value: item.evidence_value ?? '',
+        status: ['matched', 'mismatched', 'missing', 'not_applicable'].includes(item.status) ? item.status : 'missing',
+        source_file: item.source_file || '',
+        source_section: item.source_section || '',
+        reference_number: item.reference_number || '',
+        explanation: item.explanation || ''
+      }))
+    : [];
+
+  const evidenceFiles = Array.isArray(auditResult.evidence_files)
+    ? auditResult.evidence_files
+    : candidateNodes.map((node) => `${node.fileName} (${node.identifier})`);
+
+  const referenceNumbers = Array.isArray(auditResult.reference_numbers)
+    ? auditResult.reference_numbers
+    : [];
+
+  const statuses = parameterMatches.map((item) => item.status);
+  const hasMismatch = statuses.includes('mismatched');
+  const hasMissing = statuses.includes('missing');
+  const matchedCount = statuses.filter((status) => status === 'matched' || status === 'not_applicable').length;
+  const totalCount = Math.max(statuses.length, 1);
+
+  let status = auditResult.status;
+  if (!['matched', 'mismatched', 'flagged'].includes(status)) {
+    status = hasMismatch ? 'mismatched' : hasMissing ? 'flagged' : 'matched';
+  }
+
+  const computedConfidence = Math.min(1, Math.max(0, matchedCount / totalCount));
+  const confidence = Number.isFinite(Number(auditResult.confidence))
+    ? Math.min(1, Math.max(0, Number(auditResult.confidence)))
+    : computedConfidence;
+
+  return {
+    txn_id: String(auditResult.transaction_id || (txn[txnIdKey] ?? 'UNKNOWN')),
+    vendor: auditResult.vendor || txn[allHeaders[1]] || 'UNKNOWN',
+    amount_dump: Number(txn[amountKey]) || 0,
+    amount_doc: Number(auditResult.amount_doc) || 0,
+    confidence,
+    status,
+    auditor_notes: auditResult.auditor_notes || 'Processed by CA-style parameter reconciliation engine.',
+    match_details: parameterMatches,
+    evidence_files: evidenceFiles,
+    reference_numbers: referenceNumbers
+  };
+}
+
+function parseEncryptedJSONField(value, fallback) {
+  const decrypted = decryptText(value);
+  if (!decrypted) return fallback;
+  try {
+    return JSON.parse(decrypted);
+  } catch (_err) {
+    return fallback;
+  }
 }
 
 // Helper: Parse PDF page by page using PDFParse class
@@ -234,15 +403,20 @@ Return ONLY a raw JSON object with these exact keys. No conversational prefixes,
 }
 
 // 1. Secure Upload Preparation Endpoint
-app.post('/api/prepare-upload', async (req, res) => {
+app.post('/api/prepare-upload', requireAuth, async (req, res) => {
   try {
     const { filename, mimeType, clientId } = req.body;
     if (!filename || !clientId) {
       return res.status(400).json({ error: 'Missing filename or clientId' });
     }
+
+    if (clientId !== req.auth.user.id) {
+      return res.status(403).json({ error: 'clientId must match the authenticated user' });
+    }
     
     const timestamp = Date.now();
-    const storagePath = `${clientId}/${timestamp}_${filename}`;
+    const safeFilename = sanitizeStorageFilename(filename);
+    const storagePath = `${clientId}/${timestamp}_${safeFilename}`;
     
     // Generate signed upload URL from Supabase (bypassing Express payload limits & keeping it secure)
     const { data, error } = await supabase.storage
@@ -280,13 +454,24 @@ app.post('/api/prepare-upload', async (req, res) => {
 });
 
 // 2. Encrypted Batch & Document Creation Endpoint
-app.post('/api/create-batch', async (req, res) => {
+app.post('/api/create-batch', requireAuth, async (req, res) => {
   try {
     const { clientId, excelPath, supportPaths, processingMode } = req.body;
     
     if (!excelPath || !clientId) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
+
+    if (clientId !== req.auth.user.id) {
+      return res.status(403).json({ error: 'clientId must match the authenticated user' });
+    }
+
+    const paths = [excelPath, ...(Array.isArray(supportPaths) ? supportPaths : [])];
+    if (paths.some((path) => !String(path).startsWith(`${clientId}/`))) {
+      return res.status(403).json({ error: 'All file paths must belong to the authenticated user' });
+    }
+
+    const supportFilePaths = Array.isArray(supportPaths) ? supportPaths : [];
     
     const rawExcelName = excelPath.split('/').pop().split('_').slice(1).join('_') || excelPath.split('/').pop();
     const encryptedExcelName = encryptText(rawExcelName);
@@ -307,7 +492,7 @@ app.post('/api/create-batch', async (req, res) => {
     const dbBatchId = batchData.id;
     
     // Insert encrypted document rows
-    for (const path of supportPaths) {
+    for (const path of supportFilePaths) {
       const rawName = path.split('/').pop().split('_').slice(1).join('_') || path.split('/').pop();
       const encryptedName = encryptText(rawName);
       
@@ -359,10 +544,10 @@ app.post('/api/create-batch', async (req, res) => {
         const txnRows = allRows.slice(0, 25); // Audit limit up to 25 transactions
 
         // 2. Download and Decrypt Supporting Documents to build PageTreeIndex
-        console.log(`Building secure PageTreeIndex for ${supportPaths.length} supporting documents...`);
+        console.log(`Building secure PageTreeIndex for ${supportFilePaths.length} supporting documents...`);
         let supportNodes = [];
 
-        for (const path of supportPaths) {
+        for (const path of supportFilePaths) {
           const { data: keyRow, error: kErr } = await supabase
             .from('file_keys')
             .select('wrapped_key, iv')
@@ -433,7 +618,7 @@ app.post('/api/create-batch', async (req, res) => {
           // Step 1: Reasoning-Based Navigation
           let candidateIndices = [];
           try {
-            const navigationPrompt = `You are a professional financial auditor data lookup assistant. Given a specific transaction and a structured index of all supporting documents (PageTreeIndex), identify which indexId numbers are highly likely to contain the supporting evidence (such as invoices, fixed deposit advices, bank statements, or approval emails) for this transaction.
+            const navigationPrompt = `You are a professional CA audit document navigation assistant. Given one dump row and a PageTreeIndex of supporting documents, identify all pages/sheets needed to vouch every relevant parameter, not only amount and vendor.
 
 TRANSACTION TO AUDIT:
 ${JSON.stringify(txn, null, 2)}
@@ -442,10 +627,11 @@ SUPPORTING DOCUMENTS INDEX (PageTreeIndex):
 ${JSON.stringify(pageTreeIndex, null, 2)}
 
 INSTRUCTIONS:
-1. Search the PageTreeIndex for nodes where the vendor or account name matches (fuzzy).
-2. Look for matching amounts or values.
-3. Output a list of "indexId" numbers of the candidate pages/sheets as a raw JSON array.
-4. Return ONLY a raw JSON array of integers representing the indexIds. Do not write code or text.
+1. Search for vendor/bank/counterparty, amount, date, value date, maturity date, invoice number, account number, FDR number, UTR/reference number, PO/GRN, narration, tax/GST, and any other dump column.
+2. Include corroborating email receipts, approval mails, bank advices, FDR files, invoices, and spreadsheets when they support the same transaction.
+3. For fixed deposits, include both the FDR/advice page and any email receipt/approval that confirms placement, bank, principal, date, maturity, rate, or reference.
+4. Output a list of indexId numbers for all candidate pages/sheets needed for expert vouching.
+5. Return ONLY a raw JSON array of integers. Do not write code or text.
 Example: [0, 2]`;
 
             const navResponse = await retryOpenAICall(async () => {
@@ -472,25 +658,34 @@ Example: [0, 2]`;
           // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
           if (candidateIndices.length === 0) {
             const keys = Object.keys(txn);
-            const vendorKey = allHeaders[1] || keys[1] || 'Vendor';
             const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
             
-            const vendorQuery = (txn[vendorKey] || '').toLowerCase().split(/[\s,]+/)[0];
             const amountQuery = String(txn[amountKey] || '');
+            const meaningfulValues = Object.values(txn)
+              .map(value => String(value || '').toLowerCase().trim())
+              .filter(value => value.length >= 3)
+              .flatMap(value => value.split(/[\s,;/|]+/).filter(part => part.length >= 3));
             
             candidateIndices = pageTreeIndex.filter(p => {
               const vName = (p.vendorName || '').toLowerCase();
               const summary = (p.summary || '').toLowerCase();
               const docType = (p.documentType || '').toLowerCase();
               const fName = (p.fileName || '').toLowerCase();
+              const invoice = (p.invoiceNumber || '').toLowerCase();
               
               const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
-              const vendorMatch = vendorQuery && (vName.includes(vendorQuery) || summary.includes(vendorQuery) || fName.includes(vendorQuery));
+              const fieldMatch = meaningfulValues.some(value =>
+                vName.includes(value) ||
+                summary.includes(value) ||
+                fName.includes(value) ||
+                invoice.includes(value) ||
+                docType.includes(value)
+              );
               
-              return amountMatch || vendorMatch;
+              return amountMatch || fieldMatch;
             }).map(p => p.indexId);
             
-            if (candidateIndices.length === 0) {
+            if (candidateIndices.length === 0 && supportNodes.length > 0) {
               candidateIndices = [0];
             }
           }
@@ -500,36 +695,58 @@ Example: [0, 2]`;
             const node = supportNodes[id];
             return `--- File: ${node.fileName} | ${node.identifier} ---\n${node.rawText}`;
           }).join('\n\n');
+          const candidateNodes = candidateIndices.map(id => supportNodes[id]).filter(Boolean);
 
           // Step 3: Column-by-column reconciliation & audit matching
           try {
-            const reconciliationPrompt = `You are an expert financial auditor performing a detailed vouching audit. Your task is to reconcile a single transaction row against the selected detailed contents of the supporting documents.
+            const reconciliationPrompt = `You are an expert Chartered Accountant performing a detailed statutory audit vouching procedure. Reconcile the transaction dump row against the selected supporting documents exactly as a senior CA would: inspect every material parameter independently, cite the precise evidence, and conclude whether the transaction is vouched.
 
-TRANSACTION DETAILS:
+TRANSACTION DUMP ROW TO VOUCH:
 ${JSON.stringify(txn, null, 2)}
 
 SUPPORTING DOCUMENT DETAILS:
 ${candidateDocsContent}
 
 AUDITING INSTRUCTIONS:
-Perform a strict column-by-column reconciliation:
-1. **Vendor Name**: Check if the vendor/bank name matches (fuzzy).
-2. **Amount**: Check if the amount matches (check exact and decimal matches).
-3. **Date**: Verify if the transaction date corresponds to the document date.
-4. **Reference Numbers**: Reconcile account/invoice numbers or references.
+Perform a strict parameter-by-parameter reconciliation for every relevant dump column and every audit assertion:
+1. Counterparty/vendor/bank/customer name.
+2. Amount/principal/tax/total and currency.
+3. Transaction date, document date, value date, maturity date, due date, or receipt date.
+4. Invoice number, FDR number, UTR, cheque number, account number, PO/GRN, contract number, or other references.
+5. Narration/description/purpose and document type.
+6. For FDR/fixed deposit transactions, compare the FDR/advice with mail receipts or approval emails and confirm bank, principal, FDR/reference number, placement/value date, maturity date, rate, and maturity value when available.
+7. For invoice/receipt transactions, compare invoice/receipt/e-mail/ledger support and identify the exact IDs used.
+8. If a parameter is not applicable, mark it "not_applicable"; if support is missing, mark it "missing"; if conflicting, mark it "mismatched".
+9. Do not mark the transaction matched only because amount and vendor match. Overall status must reflect all important parameters.
 
 DETERMINE STATUS & CONFIDENCE:
-- If vendor and amount match exactly/closely, and references correlate → status: "matched", confidence: 0.95 to 1.0.
-- If vendor matches but amount differs → status: "mismatched", confidence: 0.5 to 0.8.
-- If details are conflicting or missing → status: "flagged", confidence: 0.0 to 0.4.
+- "matched": all material parameters are matched or properly not applicable.
+- "mismatched": any material parameter conflicts with supporting evidence.
+- "flagged": evidence is missing, inconclusive, or not enough to complete vouching.
+- Confidence should be based on the proportion and importance of matched parameters, not just amount/vendor.
 
 Return ONLY a raw JSON object matching the following structure. No markdown code blocks, no conversational text.
 {
+  "transaction_id": "<dump transaction id/reference>",
   "vendor": "<inferred vendor>",
   "amount_doc": <numeric amount or 0>,
   "confidence": <confidence score 0.0 to 1.0>,
   "status": "matched" | "mismatched" | "flagged",
-  "auditor_notes": "<highly detailed, professional audit note explaining comparison and CITING exact filename & page.>"
+  "reference_numbers": ["<invoice/FDR/UTR/account/reference numbers actually used>"],
+  "evidence_files": ["<filename and page/sheet used>"],
+  "parameter_matches": [
+    {
+      "parameter": "<dump column or audit assertion>",
+      "dump_value": "<value from dump>",
+      "evidence_value": "<value found in support>",
+      "status": "matched" | "mismatched" | "missing" | "not_applicable",
+      "source_file": "<exact filename>",
+      "source_section": "<page/sheet>",
+      "reference_number": "<invoice/FDR/UTR/account/reference if used>",
+      "explanation": "<brief CA-style reasoning>"
+    }
+  ],
+  "auditor_notes": "<CA-style conclusion citing exact files, sections, IDs/reference numbers, and unresolved issues.>"
 }`;
 
             const modelName = isTurbo ? "meta/llama-3.1-8b-instruct" : "meta/llama-3.3-70b-instruct";
@@ -538,7 +755,7 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
                 model: modelName,
                 messages: [{ role: "user", content: reconciliationPrompt }],
                 temperature: 0.05,
-                max_tokens: 800,
+                max_tokens: 1800,
               });
             });
             await sleep(300); // rate limit padding spacing
@@ -546,19 +763,7 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
             const auditText = auditResponse.choices[0].message.content.trim();
             const auditResult = parseRobustJSON(auditText);
 
-            const keys = Object.keys(txn);
-            const txnIdKey = keys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('ref') || k.toLowerCase().includes('no')) || keys[0];
-            const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
-
-            finalVouchingResults.push({
-              txn_id: String(txn[txnIdKey] ?? 'UNKNOWN'),
-              vendor: auditResult.vendor || txn[allHeaders[1]] || 'UNKNOWN',
-              amount_dump: Number(txn[amountKey]) || 0,
-              amount_doc: Number(auditResult.amount_doc) || 0,
-              confidence: Number(auditResult.confidence) || 0,
-              status: auditResult.status || 'flagged',
-              auditor_notes: auditResult.auditor_notes || 'Processed by PageIndex RAG engine.'
-            });
+            finalVouchingResults.push(normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes));
 
           } catch (auditErr) {
             console.error(`Audit error for transaction:`, auditErr);
@@ -573,7 +778,10 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
               amount_doc: 0,
               confidence: 0.1,
               status: 'flagged',
-              auditor_notes: `Flagged: Internal error during audit verification: ${auditErr.message}`
+              auditor_notes: `Flagged: Internal error during audit verification: ${auditErr.message}`,
+              match_details: [],
+              evidence_files: candidateNodes.map((node) => `${node.fileName} (${node.identifier})`),
+              reference_numbers: []
             });
           }
         }
@@ -588,7 +796,10 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
           amount_doc: encryptText(r.amount_doc),
           confidence: encryptText(r.confidence),
           status: r.status, // Keep clear to enable frontend RLS filters and status counts
-          auditor_notes: encryptText(r.auditor_notes)
+          auditor_notes: encryptText(r.auditor_notes),
+          match_details: encryptText(JSON.stringify(r.match_details || [])),
+          evidence_files: encryptText(JSON.stringify(r.evidence_files || [])),
+          reference_numbers: encryptText(JSON.stringify(r.reference_numbers || []))
         }));
 
         await supabase.from('vouching_results').insert(resultsToInsert);
@@ -612,12 +823,17 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
 });
 
 // 3. Batches Listing API (with metadata decryption)
-app.get('/api/batches', async (req, res) => {
+app.get('/api/batches', requireAuth, async (req, res) => {
   try {
     const { userId } = req.query;
     let query = supabase.from('batches').select('*');
     if (userId) {
+      if (!canAccessUser(req, userId)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       query = query.eq('user_id', userId);
+    } else if (!['admin', 'auditor'].includes(req.auth.role)) {
+      query = query.eq('user_id', req.auth.user.id);
     }
     const { data: rawBatches, error } = await query.order('created_at', { ascending: false });
       
@@ -637,7 +853,7 @@ app.get('/api/batches', async (req, res) => {
 });
 
 // 4. Vouching Results Decryption & Retrieval API
-app.get('/api/batches/:id/results', async (req, res) => {
+app.get('/api/batches/:id/results', requireAuth, requireBatchAccess, async (req, res) => {
   try {
     const batchId = req.params.id;
     const { data: encryptedResults, error } = await supabase
@@ -658,6 +874,9 @@ app.get('/api/batches/:id/results', async (req, res) => {
       confidence: Number(decryptText(r.confidence)) || 0,
       status: r.status,
       auditor_notes: decryptText(r.auditor_notes),
+      match_details: parseEncryptedJSONField(r.match_details, []),
+      evidence_files: parseEncryptedJSONField(r.evidence_files, []),
+      reference_numbers: parseEncryptedJSONField(r.reference_numbers, []),
       created_at: r.created_at
     }));
     
@@ -669,11 +888,25 @@ app.get('/api/batches/:id/results', async (req, res) => {
 });
 
 // 5. Secure Decrypted Document Streaming Endpoint
-app.get('/api/batches/:id/document', async (req, res) => {
+app.get('/api/batches/:id/document', requireAuth, requireBatchAccess, async (req, res) => {
   try {
     const { path: filePath } = req.query;
     if (!filePath) {
       return res.status(400).json({ error: "Missing document path" });
+    }
+
+    const { data: matchingDoc, error: docLookupError } = await supabase
+      .from('documents')
+      .select('id')
+      .eq('batch_id', req.batch.id)
+      .eq('file_url', filePath)
+      .maybeSingle();
+
+    if (docLookupError) throw docLookupError;
+
+    const isBatchExcel = filePath === req.batch.file_url;
+    if (!isBatchExcel && !matchingDoc) {
+      return res.status(403).json({ error: 'Document is not part of this batch' });
     }
 
     // Fetch File Key & IV mapping from database
@@ -731,13 +964,28 @@ app.get('/api/batches/:id/document', async (req, res) => {
 });
 
 // 6. Manual Auditor Override Status & Notes Endpoint
-app.post('/api/results/:id/override', async (req, res) => {
+app.post('/api/results/:id/override', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, auditor_notes } = req.body;
 
-    if (!status) {
-      return res.status(400).json({ error: "Missing status parameter" });
+    const allowedStatuses = ['matched', 'mismatched', 'flagged', 'manually_resolved'];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status parameter" });
+    }
+
+    const { data: existingResult, error: resultLookupError } = await supabase
+      .from('vouching_results')
+      .select('id, batch_id, batches!inner(user_id)')
+      .eq('id', id)
+      .single();
+
+    if (resultLookupError || !existingResult) {
+      return res.status(404).json({ error: 'Result not found' });
+    }
+
+    if (!canAccessUser(req, existingResult.batches.user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     const updates = {};
@@ -765,7 +1013,10 @@ app.post('/api/results/:id/override', async (req, res) => {
         amount_dump: Number(decryptText(data.amount_dump)) || 0,
         amount_doc: Number(decryptText(data.amount_doc)) || 0,
         confidence: Number(decryptText(data.confidence)) || 0,
-        auditor_notes: decryptText(data.auditor_notes)
+        auditor_notes: decryptText(data.auditor_notes),
+        match_details: parseEncryptedJSONField(data.match_details, []),
+        evidence_files: parseEncryptedJSONField(data.evidence_files, []),
+        reference_numbers: parseEncryptedJSONField(data.reference_numbers, [])
       }
     });
 
@@ -773,6 +1024,11 @@ app.post('/api/results/:id/override', async (req, res) => {
     console.error("Override result error:", err);
     res.status(500).json({ error: err.message });
   }
+});
+
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled API error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3000;

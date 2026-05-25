@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { apiFetch } from '../lib/api';
 import { FileText, Download, RefreshCw } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -10,13 +10,11 @@ export default function ClientReports() {
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState({ isOpen: false, title: '', message: '' });
 
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-
   const fetchReports = async () => {
     if (!session?.user?.id) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
+      const res = await apiFetch(`/api/batches?userId=${session.user.id}&_t=${Date.now()}`);
       if (!res.ok) throw new Error("Failed to fetch reports");
       const data = await res.json();
       
@@ -37,7 +35,7 @@ export default function ClientReports() {
 
   const downloadReport = async (batchId, filename) => {
     try {
-      const response = await fetch(`${API_URL}/api/batches/${batchId}/results`);
+      const response = await apiFetch(`/api/batches/${batchId}/results`);
       if (!response.ok) throw new Error("Failed to fetch decrypted results");
       const data = await response.json();
       
@@ -46,7 +44,7 @@ export default function ClientReports() {
         return;
       }
 
-      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Auditor Notes'];
+      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Reference Numbers', 'Evidence Files', 'Parameter Matches', 'Auditor Notes'];
       const rows = data.map(row => ([
         row.txn_id || '',
         row.vendor || '',
@@ -54,6 +52,9 @@ export default function ClientReports() {
         row.amount_doc || 0,
         Math.round((row.confidence || 0) * 100),
         (row.status || '').toUpperCase(),
+        (row.reference_numbers || []).join(', '),
+        (row.evidence_files || []).join('; '),
+        (row.match_details || []).map(item => `${item.parameter}: ${item.status} (dump=${item.dump_value || ''}; evidence=${item.evidence_value || ''}; source=${item.source_file || ''} ${item.source_section || ''})`).join('\n'),
         row.auditor_notes || ''
       ]));
 
@@ -61,7 +62,7 @@ export default function ClientReports() {
       const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
       
       worksheet['!cols'] = [
-        { wch: 16 }, { wch: 35 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 55 }
+        { wch: 16 }, { wch: 35 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 45 }, { wch: 80 }, { wch: 55 }
       ];
 
       const workbook = XLSX.utils.book_new();

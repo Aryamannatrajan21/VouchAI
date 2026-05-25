@@ -1,7 +1,12 @@
 const crypto = require('crypto');
 
 // Derives a secure 32-byte (256-bit) buffer key from the environment secret
-const masterSecret = process.env.ENCRYPTION_SECRET || 'fallback-vouch-ai-secret-default-key-32b';
+const masterSecret = process.env.ENCRYPTION_SECRET;
+
+if (!masterSecret || masterSecret.length < 32) {
+  throw new Error('ENCRYPTION_SECRET must be set to at least 32 characters.');
+}
+
 const MASTER_KEY = crypto.createHash('sha256').update(masterSecret).digest();
 
 /**

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { UploadCloud, File, Image as ImageIcon, X } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { apiFetch } from '../lib/api';
 
 export default function DocumentUpload() {
   const { session } = useOutletContext();
@@ -71,9 +71,8 @@ export default function DocumentUpload() {
 
       // 1. Prepare and Upload Transaction Excel Dump
       setMessage('Encrypting and uploading Excel dump...');
-      const excelPrepRes = await fetch('http://localhost:3000/api/prepare-upload', {
+      const excelPrepRes = await apiFetch('/api/prepare-upload', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           filename: excelFile.name,
           mimeType: excelFile.type || 'application/octet-stream',
@@ -103,9 +102,8 @@ export default function DocumentUpload() {
         const file = supportFiles[i];
         setMessage(`Encrypting and uploading supporting document [${i + 1}/${supportFiles.length}]: ${file.name}...`);
         
-        const filePrepRes = await fetch('http://localhost:3000/api/prepare-upload', {
+        const filePrepRes = await apiFetch('/api/prepare-upload', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             filename: file.name,
             mimeType: file.type || 'application/octet-stream',
@@ -133,9 +131,8 @@ export default function DocumentUpload() {
 
       // 3. Trigger Batch Creation and Secure Processing
       setMessage('Finalizing secure batch creation...');
-      const response = await fetch('http://localhost:3000/api/create-batch', {
+      const response = await apiFetch('/api/create-batch', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, excelPath, supportPaths, processingMode })
       });
 

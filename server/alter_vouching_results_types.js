@@ -1,11 +1,7 @@
 const { Client } = require('pg');
 
 const client = new Client({
-  host: 'db.ggzltbymirqpqkkollnc.supabase.co',
-  port: 5432,
-  user: 'postgres',
-  password: 'TPwuSbskuQ6yGKeo',
-  database: 'postgres',
+  connectionString: process.env.SUPABASE_DB_URL,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -18,6 +14,11 @@ async function run() {
         ALTER COLUMN amount_dump TYPE text USING amount_dump::text,
         ALTER COLUMN amount_doc TYPE text USING amount_doc::text,
         ALTER COLUMN confidence TYPE text USING confidence::text;
+
+      ALTER TABLE public.vouching_results
+        ADD COLUMN IF NOT EXISTS match_details text,
+        ADD COLUMN IF NOT EXISTS evidence_files text,
+        ADD COLUMN IF NOT EXISTS reference_numbers text;
         
       console_log('Successfully altered columns to text!');
     `;
@@ -27,6 +28,10 @@ async function run() {
         ALTER COLUMN amount_dump TYPE text USING amount_dump::text,
         ALTER COLUMN amount_doc TYPE text USING amount_doc::text,
         ALTER COLUMN confidence TYPE text USING confidence::text;
+      ALTER TABLE public.vouching_results
+        ADD COLUMN IF NOT EXISTS match_details text,
+        ADD COLUMN IF NOT EXISTS evidence_files text,
+        ADD COLUMN IF NOT EXISTS reference_numbers text;
     `);
     console.log('Successfully altered vouching_results column types to TEXT to support encryption!');
   } catch (err) {

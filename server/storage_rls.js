@@ -2,11 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { Client } = require('pg');
 
 const client = new Client({
-  host: 'db.ggzltbymirqpqkkollnc.supabase.co',
-  port: 5432,
-  user: 'postgres',
-  password: 'TPwuSbskuQ6yGKeo',
-  database: 'postgres',
+  connectionString: process.env.SUPABASE_DB_URL,
   ssl: { rejectUnauthorized: false }
 });
 
