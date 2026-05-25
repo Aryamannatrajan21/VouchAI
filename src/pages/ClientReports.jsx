@@ -44,25 +44,44 @@ export default function ClientReports() {
         return;
       }
 
-      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Confidence (%)', 'Status', 'Reference Numbers', 'Evidence Files', 'Parameter Matches', 'Auditor Notes'];
-      const rows = data.map(row => ([
-        row.txn_id || '',
-        row.vendor || '',
-        row.amount_dump || 0,
-        row.amount_doc || 0,
-        Math.round((row.confidence || 0) * 100),
-        (row.status || '').toUpperCase(),
-        (row.reference_numbers || []).join(', '),
-        (row.evidence_files || []).join('; '),
-        (row.match_details || []).map(item => `${item.parameter}: ${item.status} (dump=${item.dump_value || ''}; evidence=${item.evidence_value || ''}; source=${item.source_file || ''} ${item.source_section || ''})`).join('\n'),
-        row.auditor_notes || ''
-      ]));
+      const headers = ['Transaction ID', 'Vendor', 'Excel Amount', 'Doc Amount', 'Mail Amount', 'Confidence (%)', 'Status', 'Reference Numbers', 'Evidence Files', 'Parameter Matches', 'Auditor Notes'];
+      const rows = data.map(row => {
+        const mailMatch = (row.match_details || []).find(item => {
+          const paramLower = (item.parameter || '').toLowerCase();
+          return (paramLower.includes('mail') || paramLower.includes('email') || paramLower.includes('approval')) && 
+                 (paramLower.includes('amount') || paramLower.includes('value') || paramLower.includes('principal'));
+        });
+        
+        let mailAmountVal = '';
+        if (mailMatch) {
+          const rawVal = String(mailMatch.evidence_value || '');
+          const cleanNum = Number(rawVal.replace(/[^0-9.]/g, ''));
+          mailAmountVal = !isNaN(cleanNum) && cleanNum > 0 ? cleanNum : rawVal;
+        } else {
+          const hasMailSupport = (row.evidence_files || []).some(f => f.toLowerCase().includes('mail') || f.toLowerCase().includes('approval') || f.toLowerCase().includes('req'));
+          mailAmountVal = hasMailSupport ? 'Matched in Mail' : 'N/A';
+        }
+
+        return [
+          row.txn_id || '',
+          row.vendor || '',
+          row.amount_dump || 0,
+          row.amount_doc || 0,
+          mailAmountVal,
+          Math.round((row.confidence || 0) * 100),
+          (row.status || '').toUpperCase(),
+          (row.reference_numbers || []).join(', '),
+          (row.evidence_files || []).join('; '),
+          (row.match_details || []).map(item => `${item.parameter}: ${item.status} (dump=${item.dump_value || ''}; evidence=${item.evidence_value || ''}; source=${item.source_file || ''} ${item.source_section || ''})`).join('\n'),
+          row.auditor_notes || ''
+        ];
+      });
 
       const worksheetData = [headers, ...rows];
       const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
       
       worksheet['!cols'] = [
-        { wch: 16 }, { wch: 35 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 45 }, { wch: 80 }, { wch: 55 }
+        { wch: 16 }, { wch: 35 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 45 }, { wch: 80 }, { wch: 55 }
       ];
 
       const workbook = XLSX.utils.book_new();
