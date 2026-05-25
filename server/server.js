@@ -513,10 +513,7 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
       if (docError) console.error("Error creating document record:", docError);
     }
     
-    res.json({ message: 'Secure batch created and processing started', batchId: dbBatchId });
-
-    // AI Processing Loop on Decrypted Streams in-memory
-    setTimeout(async () => {
+    const runProcessing = async () => {
       try {
         console.log(`Starting secure decrypted AI processing for batch ${dbBatchId}...`);
         const isTurbo = processingMode === '8b';
@@ -830,7 +827,17 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
           console.error("Failed to update status to failed:", dbErr);
         }
       }
-    }, 0);
+    };
+
+    if (process.env.VERCEL) {
+      console.log(`VERCEL ENVIRONMENT DETECTED: Running vouching process synchronously in request lifecycle to avoid background thread freezing.`);
+      await runProcessing();
+      res.json({ message: 'Secure batch created and processing completed', batchId: dbBatchId });
+    } else {
+      console.log(`LOCAL ENVIRONMENT DETECTED: Running vouching process asynchronously in background thread.`);
+      res.json({ message: 'Secure batch created and processing started', batchId: dbBatchId });
+      setTimeout(runProcessing, 0);
+    }
 
   } catch (error) {
     console.error('Server error:', error);
