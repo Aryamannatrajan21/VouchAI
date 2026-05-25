@@ -624,15 +624,19 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
 
         // 3. Navigation & Matching Loop
         const finalVouchingResults = [];
+        const concurrencyLimit = 5;
 
-        for (let idx = 0; idx < txnRows.length; idx++) {
-          const txn = txnRows[idx];
-          console.log(`[${idx+1}/${txnRows.length}] Secure Auditing transaction: ID = ${txn[allHeaders[0]] || 'N/A'}`);
-
-          // Step 1: Reasoning-Based Navigation
-          let candidateIndices = [];
-          try {
-            const navigationPrompt = `You are a professional CA audit document navigation assistant. Given one dump row and a PageTreeIndex of supporting documents, identify all pages/sheets needed to vouch every relevant parameter, not only amount and vendor.
+        for (let i = 0; i < txnRows.length; i += concurrencyLimit) {
+          const chunk = txnRows.slice(i, i + concurrencyLimit);
+          console.log(`Processing parallel audit batch: transactions ${i + 1} to ${Math.min(i + concurrencyLimit, txnRows.length)}...`);
+          
+          const chunkPromises = chunk.map(async (txn, localIdx) => {
+            const idx = i + localIdx;
+            
+            // Step 1: Reasoning-Based Navigation
+            let candidateIndices = [];
+            try {
+              const navigationPrompt = `You are a professional CA audit document navigation assistant. Given one dump row and a PageTreeIndex of supporting documents, identify all pages/sheets needed to vouch every relevant parameter, not only amount and vendor.
 
 TRANSACTION TO AUDIT:
 ${JSON.stringify(txn, null, 2)}
@@ -648,72 +652,72 @@ INSTRUCTIONS:
 5. Return ONLY a raw JSON array of integers. Do not write code or text.
 Example: [0, 2]`;
 
-            const navResponse = await retryOpenAICall(async () => {
-              return await openai.chat.completions.create({
-                model: "meta/llama-3.1-8b-instruct",
-                messages: [{ role: "user", content: navigationPrompt }],
-                temperature: 0.05,
-                max_tokens: 100,
+              const navResponse = await retryOpenAICall(async () => {
+                return await openai.chat.completions.create({
+                  model: "meta/llama-3.1-8b-instruct",
+                  messages: [{ role: "user", content: navigationPrompt }],
+                  temperature: 0.05,
+                  max_tokens: 100,
+                });
               });
-            });
 
-            const navText = navResponse.choices[0].message.content.trim();
-            candidateIndices = parseRobustJSON(navText);
-            if (!Array.isArray(candidateIndices)) candidateIndices = [];
-            
-            // Clean and validate candidateIndices
-            candidateIndices = candidateIndices
-              .map(x => parseInt(x, 10))
-              .filter(x => !isNaN(x) && x >= 0 && x < supportNodes.length);
-          } catch (navErr) {
-            console.error("Navigation error:", navErr);
-          }
-
-          // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
-          if (candidateIndices.length === 0) {
-            const keys = Object.keys(txn);
-            const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
-            
-            const amountQuery = String(txn[amountKey] || '');
-            const meaningfulValues = Object.values(txn)
-              .map(value => String(value || '').toLowerCase().trim())
-              .filter(value => value.length >= 3)
-              .flatMap(value => value.split(/[\s,;/|]+/).filter(part => part.length >= 3));
-            
-            candidateIndices = pageTreeIndex.filter(p => {
-              const vName = (p.vendorName || '').toLowerCase();
-              const summary = (p.summary || '').toLowerCase();
-              const docType = (p.documentType || '').toLowerCase();
-              const fName = (p.fileName || '').toLowerCase();
-              const invoice = (p.invoiceNumber || '').toLowerCase();
+              const navText = navResponse.choices[0].message.content.trim();
+              candidateIndices = parseRobustJSON(navText);
+              if (!Array.isArray(candidateIndices)) candidateIndices = [];
               
-              const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
-              const fieldMatch = meaningfulValues.some(value =>
-                vName.includes(value) ||
-                summary.includes(value) ||
-                fName.includes(value) ||
-                invoice.includes(value) ||
-                docType.includes(value)
-              );
-              
-              return amountMatch || fieldMatch;
-            }).map(p => p.indexId);
-            
-            if (candidateIndices.length === 0 && supportNodes.length > 0) {
-              candidateIndices = [0];
+              // Clean and validate candidateIndices
+              candidateIndices = candidateIndices
+                .map(x => parseInt(x, 10))
+                .filter(x => !isNaN(x) && x >= 0 && x < supportNodes.length);
+            } catch (navErr) {
+              console.error("Navigation error:", navErr);
             }
-          }
 
-          // Step 2: Fetch detailed raw contents for candidate nodes
-          const candidateDocsContent = candidateIndices.map(id => {
-            const node = supportNodes[id];
-            return `--- File: ${node.fileName} | ${node.identifier} ---\n${node.rawText}`;
-          }).join('\n\n');
-          const candidateNodes = candidateIndices.map(id => supportNodes[id]).filter(Boolean);
+            // Double-Layered Protection: Fallback to local keyword/fuzzy matching if LLM navigation returned empty
+            if (candidateIndices.length === 0) {
+              const keys = Object.keys(txn);
+              const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
+              
+              const amountQuery = String(txn[amountKey] || '');
+              const meaningfulValues = Object.values(txn)
+                .map(value => String(value || '').toLowerCase().trim())
+                .filter(value => value.length >= 3)
+                .flatMap(value => value.split(/[\s,;/|]+/).filter(part => part.length >= 3));
+              
+              candidateIndices = pageTreeIndex.filter(p => {
+                const vName = (p.vendorName || '').toLowerCase();
+                const summary = (p.summary || '').toLowerCase();
+                const docType = (p.documentType || '').toLowerCase();
+                const fName = (p.fileName || '').toLowerCase();
+                const invoice = (p.invoiceNumber || '').toLowerCase();
+                
+                const amountMatch = amountQuery && (summary.includes(amountQuery) || String(p.totalAmount).includes(amountQuery));
+                const fieldMatch = meaningfulValues.some(value =>
+                  vName.includes(value) ||
+                  summary.includes(value) ||
+                  fName.includes(value) ||
+                  invoice.includes(value) ||
+                  docType.includes(value)
+                );
+                
+                return amountMatch || fieldMatch;
+              }).map(p => p.indexId);
+              
+              if (candidateIndices.length === 0 && supportNodes.length > 0) {
+                candidateIndices = [0];
+              }
+            }
 
-          // Step 3: Column-by-column reconciliation & audit matching
-          try {
-            const reconciliationPrompt = `You are an expert Chartered Accountant performing a detailed statutory audit vouching procedure. Reconcile the transaction dump row against the selected supporting documents exactly as a senior CA would: inspect every material parameter independently, cite the precise evidence, and conclude whether the transaction is vouched.
+            // Step 2: Fetch detailed raw contents for candidate nodes
+            const candidateDocsContent = candidateIndices.map(id => {
+              const node = supportNodes[id];
+              return `--- File: ${node.fileName} | ${node.identifier} ---\n${node.rawText}`;
+            }).join('\n\n');
+            const candidateNodes = candidateIndices.map(id => supportNodes[id]).filter(Boolean);
+
+            // Step 3: Column-by-column reconciliation & audit matching
+            try {
+              const reconciliationPrompt = `You are an expert Chartered Accountant performing a detailed statutory audit vouching procedure. Reconcile the transaction dump row against the selected supporting documents exactly as a senior CA would: inspect every material parameter independently, cite the precise evidence, and conclude whether the transaction is vouched.
 
 TRANSACTION DUMP ROW TO VOUCH:
 ${JSON.stringify(txn, null, 2)}
@@ -763,41 +767,45 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
   "auditor_notes": "<CA-style conclusion citing exact files, sections, IDs/reference numbers, and unresolved issues.>"
 }`;
 
-            const modelName = "meta/llama-3.1-8b-instruct";
-            const auditResponse = await retryOpenAICall(async () => {
-              return await openai.chat.completions.create({
-                model: modelName,
-                messages: [{ role: "user", content: reconciliationPrompt }],
-                temperature: 0.05,
-                max_tokens: 1800,
+              const modelName = "meta/llama-3.1-8b-instruct";
+              const auditResponse = await retryOpenAICall(async () => {
+                return await openai.chat.completions.create({
+                  model: modelName,
+                  messages: [{ role: "user", content: reconciliationPrompt }],
+                  temperature: 0.05,
+                  max_tokens: 1800,
+                });
               });
-            });
-            await sleep(300); // rate limit padding spacing
 
-            const auditText = auditResponse.choices[0].message.content.trim();
-            const auditResult = parseRobustJSON(auditText);
+              const auditText = auditResponse.choices[0].message.content.trim();
+              const auditResult = parseRobustJSON(auditText);
 
-            finalVouchingResults.push(normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes));
+              return normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes);
 
-          } catch (auditErr) {
-            console.error(`Audit error for transaction:`, auditErr);
-            const keys = Object.keys(txn);
-            const txnIdKey = keys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('ref') || k.toLowerCase().includes('no')) || keys[0];
-            const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
+            } catch (auditErr) {
+              console.error(`Audit error for transaction:`, auditErr);
+              const keys = Object.keys(txn);
+              const txnIdKey = keys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('ref') || k.toLowerCase().includes('no')) || keys[0];
+              const amountKey = keys.find(k => k.toLowerCase().includes('amt') || k.toLowerCase().includes('amount') || k.toLowerCase().includes('val') || k.toLowerCase().includes('price')) || keys[keys.length - 1];
 
-            finalVouchingResults.push({
-              txn_id: String(txn[txnIdKey] ?? 'UNKNOWN'),
-              vendor: txn[allHeaders[1]] || 'UNKNOWN',
-              amount_dump: Number(txn[amountKey]) || 0,
-              amount_doc: 0,
-              confidence: 0.1,
-              status: 'flagged',
-              auditor_notes: `Flagged: Internal error during audit verification: ${auditErr.message}`,
-              match_details: [],
-              evidence_files: candidateNodes.map((node) => `${node.fileName} (${node.identifier})`),
-              reference_numbers: []
-            });
-          }
+              return {
+                txn_id: String(txn[txnIdKey] ?? 'UNKNOWN'),
+                vendor: txn[allHeaders[1]] || 'UNKNOWN',
+                amount_dump: Number(txn[amountKey]) || 0,
+                amount_doc: 0,
+                confidence: 0.1,
+                status: 'flagged',
+                auditor_notes: `Flagged: Internal error during audit verification: ${auditErr.message}`,
+                match_details: [],
+                evidence_files: candidateNodes.map((node) => `${node.fileName} (${node.identifier})`),
+                reference_numbers: []
+              };
+            }
+          });
+
+          const chunkResults = await Promise.all(chunkPromises);
+          finalVouchingResults.push(...chunkResults);
+          await sleep(500);
         }
 
         // 4. Save Encrypted Results to DB
