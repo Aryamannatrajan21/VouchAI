@@ -593,12 +593,15 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
           }
         }
 
-        // Generate metadata summaries for all nodes sequentially with rate limit protection
-        console.log(`Indexing ${supportNodes.length} decrypted document pages/sheets using Llama 3.1 8B...`);
-        for (let i = 0; i < supportNodes.length; i++) {
-          const node = supportNodes[i];
-          node.metadata = await generateNodeMetadata(node);
-          await sleep(500); // 500ms delay to respect API rate limits
+        // Generate metadata summaries in parallel with concurrency control (e.g. 8 at a time) to prevent timeouts
+        console.log(`Indexing ${supportNodes.length} decrypted document pages/sheets using Llama 3.1 8B in parallel...`);
+        const concurrency = 8;
+        for (let i = 0; i < supportNodes.length; i += concurrency) {
+          const chunk = supportNodes.slice(i, i + concurrency);
+          await Promise.all(chunk.map(async (node) => {
+            node.metadata = await generateNodeMetadata(node);
+          }));
+          await sleep(200); // 200ms padding between concurrent batches
         }
 
         const pageTreeIndex = supportNodes.map((node, index) => ({
