@@ -7,10 +7,50 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.crt
+*.csr
+*.kdb
+*.jks
+*.keystore
+*service-role*
+*service_role*
+*secret*
+*credential*
+*credentials*
+
+# Local database dumps and backups
+*.dump
+*.sql.gz
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+
+# Local vaults and private notes
+VouchAI-Second Brain/
+
+# Dependencies and builds
 node_modules
 dist
 dist-ssr
 *.local
+.cache
+.vite
+coverage
+server/page_*_render.png
 
 # Editor directories and files
 .vscode/*
