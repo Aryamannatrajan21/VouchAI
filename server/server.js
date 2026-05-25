@@ -801,22 +801,29 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
         }
 
         // 4. Save Encrypted Results to DB
-        console.log(`Writing symmetrically encrypted audit results to vouching_results table...`);
-        const resultsToInsert = finalVouchingResults.map(r => ({
-          batch_id: dbBatchId,
-          txn_id: encryptText(r.txn_id),
-          vendor: encryptText(r.vendor),
-          amount_dump: encryptText(r.amount_dump),
-          amount_doc: encryptText(r.amount_doc),
-          confidence: encryptText(r.confidence),
-          status: r.status, // Keep clear to enable frontend RLS filters and status counts
-          auditor_notes: encryptText(r.auditor_notes),
-          match_details: encryptText(JSON.stringify(r.match_details || [])),
-          evidence_files: encryptText(JSON.stringify(r.evidence_files || [])),
-          reference_numbers: encryptText(JSON.stringify(r.reference_numbers || []))
-        }));
+        console.log(`Writing symmetrically encrypted audit results to vouching_results table (using hybrid auditor_notes packing)...`);
+        const resultsToInsert = finalVouchingResults.map(r => {
+          const combinedNotes = {
+            notes: r.auditor_notes || '',
+            match_details: r.match_details || [],
+            evidence_files: r.evidence_files || [],
+            reference_numbers: r.reference_numbers || []
+          };
+          return {
+            batch_id: dbBatchId,
+            txn_id: encryptText(r.txn_id),
+            vendor: encryptText(r.vendor),
+            amount_dump: encryptText(r.amount_dump),
+            amount_doc: encryptText(r.amount_doc),
+            confidence: encryptText(r.confidence),
+            status: r.status, // Keep clear to enable frontend RLS filters and status counts
+            auditor_notes: encryptText(JSON.stringify(combinedNotes))
+          };
+        });
 
-        await supabase.from('vouching_results').insert(resultsToInsert);
+        const { error: insertError } = await supabase.from('vouching_results').insert(resultsToInsert);
+        if (insertError) throw insertError;
+
         await supabase.from('batches').update({ status: 'completed' }).eq('id', dbBatchId);
         
         console.log(`Secure batch ${dbBatchId} completed successfully using PageIndex RAG!`);
@@ -887,22 +894,46 @@ app.get('/api/batches/:id/results', requireAuth, requireBatchAccess, async (req,
       
     if (error) throw error;
     
-    // Decrypt all sensitive column fields
-    const decryptedResults = (encryptedResults || []).map(r => ({
-      id: r.id,
-      batch_id: r.batch_id,
-      txn_id: decryptText(r.txn_id),
-      vendor: decryptText(r.vendor),
-      amount_dump: Number(decryptText(r.amount_dump)) || 0,
-      amount_doc: Number(decryptText(r.amount_doc)) || 0,
-      confidence: Number(decryptText(r.confidence)) || 0,
-      status: r.status,
-      auditor_notes: decryptText(r.auditor_notes),
-      match_details: parseEncryptedJSONField(r.match_details, []),
-      evidence_files: parseEncryptedJSONField(r.evidence_files, []),
-      reference_numbers: parseEncryptedJSONField(r.reference_numbers, []),
-      created_at: r.created_at
-    }));
+    // Decrypt and unpack sensitive fields (with backward-compatible support for legacy or hybrid notes)
+    const decryptedResults = (encryptedResults || []).map(r => {
+      const rawNotes = decryptText(r.auditor_notes);
+      let notes = rawNotes;
+      let match_details = [];
+      let evidence_files = [];
+      let reference_numbers = [];
+      
+      try {
+        const parsed = JSON.parse(rawNotes);
+        if (parsed && typeof parsed === 'object' && 'notes' in parsed) {
+          notes = parsed.notes;
+          match_details = parsed.match_details || [];
+          evidence_files = parsed.evidence_files || [];
+          reference_numbers = parsed.reference_numbers || [];
+        }
+      } catch (_err) {
+        // Fallback: This is a legacy row where auditor_notes is pure plaintext.
+        // Let's also check if the database happens to have columns
+        if (r.match_details) match_details = parseEncryptedJSONField(r.match_details, []);
+        if (r.evidence_files) evidence_files = parseEncryptedJSONField(r.evidence_files, []);
+        if (r.reference_numbers) reference_numbers = parseEncryptedJSONField(r.reference_numbers, []);
+      }
+
+      return {
+        id: r.id,
+        batch_id: r.batch_id,
+        txn_id: decryptText(r.txn_id),
+        vendor: decryptText(r.vendor),
+        amount_dump: Number(decryptText(r.amount_dump)) || 0,
+        amount_doc: Number(decryptText(r.amount_doc)) || 0,
+        confidence: Number(decryptText(r.confidence)) || 0,
+        status: r.status,
+        auditor_notes: notes,
+        match_details: match_details,
+        evidence_files: evidence_files,
+        reference_numbers: reference_numbers,
+        created_at: r.created_at
+      };
+    });
     
     res.json(decryptedResults);
   } catch (err) {
@@ -1000,7 +1031,7 @@ app.post('/api/results/:id/override', requireAuth, async (req, res) => {
 
     const { data: existingResult, error: resultLookupError } = await supabase
       .from('vouching_results')
-      .select('id, batch_id, batches!inner(user_id)')
+      .select('id, batch_id, auditor_notes, batches!inner(user_id)')
       .eq('id', id)
       .single();
 
@@ -1016,7 +1047,28 @@ app.post('/api/results/:id/override', requireAuth, async (req, res) => {
     updates.status = status;
 
     if (auditor_notes !== undefined) {
-      updates.auditor_notes = encryptText(auditor_notes);
+      let combinedNotes = {
+        notes: auditor_notes,
+        match_details: [],
+        evidence_files: [],
+        reference_numbers: []
+      };
+
+      if (existingResult.auditor_notes) {
+        const decryptedCurrent = decryptText(existingResult.auditor_notes);
+        try {
+          const parsed = JSON.parse(decryptedCurrent);
+          if (parsed && typeof parsed === 'object' && 'notes' in parsed) {
+            combinedNotes.match_details = parsed.match_details || [];
+            combinedNotes.evidence_files = parsed.evidence_files || [];
+            combinedNotes.reference_numbers = parsed.reference_numbers || [];
+          }
+        } catch (_e) {
+          // Plain text fallback
+        }
+      }
+
+      updates.auditor_notes = encryptText(JSON.stringify(combinedNotes));
     }
 
     const { data, error } = await supabase
@@ -1028,19 +1080,43 @@ app.post('/api/results/:id/override', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
+    // Unpack notes for standard response format
+    const rawNotes = decryptText(data.auditor_notes);
+    let notes = rawNotes;
+    let match_details = [];
+    let evidence_files = [];
+    let reference_numbers = [];
+    
+    try {
+      const parsed = JSON.parse(rawNotes);
+      if (parsed && typeof parsed === 'object' && 'notes' in parsed) {
+        notes = parsed.notes;
+        match_details = parsed.match_details || [];
+        evidence_files = parsed.evidence_files || [];
+        reference_numbers = parsed.reference_numbers || [];
+      }
+    } catch (_err) {
+      if (data.match_details) match_details = parseEncryptedJSONField(data.match_details, []);
+      if (data.evidence_files) evidence_files = parseEncryptedJSONField(data.evidence_files, []);
+      if (data.reference_numbers) reference_numbers = parseEncryptedJSONField(data.reference_numbers, []);
+    }
+
     res.json({
       message: "Result overridden successfully",
       result: {
-        ...data,
+        id: data.id,
+        batch_id: data.batch_id,
         txn_id: decryptText(data.txn_id),
         vendor: decryptText(data.vendor),
         amount_dump: Number(decryptText(data.amount_dump)) || 0,
         amount_doc: Number(decryptText(data.amount_doc)) || 0,
         confidence: Number(decryptText(data.confidence)) || 0,
-        auditor_notes: decryptText(data.auditor_notes),
-        match_details: parseEncryptedJSONField(data.match_details, []),
-        evidence_files: parseEncryptedJSONField(data.evidence_files, []),
-        reference_numbers: parseEncryptedJSONField(data.reference_numbers, [])
+        status: data.status,
+        auditor_notes: notes,
+        match_details: match_details,
+        evidence_files: evidence_files,
+        reference_numbers: reference_numbers,
+        created_at: data.created_at
       }
     });
 
