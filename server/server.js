@@ -289,7 +289,8 @@ function normalizeAuditResult(auditResult, txn, allHeaders, candidateNodes) {
     auditor_notes: auditResult.auditor_notes || 'Processed by CA-style parameter reconciliation engine.',
     match_details: parameterMatches,
     evidence_files: evidenceFiles,
-    reference_numbers: referenceNumbers
+    reference_numbers: referenceNumbers,
+    original_row: txn
   };
 }
 
@@ -798,7 +799,8 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
                 auditor_notes: `Flagged: Internal error during audit verification: ${auditErr.message}`,
                 match_details: [],
                 evidence_files: candidateNodes.map((node) => `${node.fileName} (${node.identifier})`),
-                reference_numbers: []
+                reference_numbers: [],
+                original_row: txn
               };
             }
           });
@@ -815,7 +817,8 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
             notes: r.auditor_notes || '',
             match_details: r.match_details || [],
             evidence_files: r.evidence_files || [],
-            reference_numbers: r.reference_numbers || []
+            reference_numbers: r.reference_numbers || [],
+            original_row: r.original_row || {}
           };
           return {
             batch_id: dbBatchId,
@@ -909,6 +912,7 @@ app.get('/api/batches/:id/results', requireAuth, requireBatchAccess, async (req,
       let match_details = [];
       let evidence_files = [];
       let reference_numbers = [];
+      let original_row = {};
       
       try {
         const parsed = JSON.parse(rawNotes);
@@ -917,10 +921,10 @@ app.get('/api/batches/:id/results', requireAuth, requireBatchAccess, async (req,
           match_details = parsed.match_details || [];
           evidence_files = parsed.evidence_files || [];
           reference_numbers = parsed.reference_numbers || [];
+          original_row = parsed.original_row || {};
         }
       } catch (_err) {
         // Fallback: This is a legacy row where auditor_notes is pure plaintext.
-        // Let's also check if the database happens to have columns
         if (r.match_details) match_details = parseEncryptedJSONField(r.match_details, []);
         if (r.evidence_files) evidence_files = parseEncryptedJSONField(r.evidence_files, []);
         if (r.reference_numbers) reference_numbers = parseEncryptedJSONField(r.reference_numbers, []);
@@ -939,6 +943,7 @@ app.get('/api/batches/:id/results', requireAuth, requireBatchAccess, async (req,
         match_details: match_details,
         evidence_files: evidence_files,
         reference_numbers: reference_numbers,
+        original_row: original_row,
         created_at: r.created_at
       };
     });
