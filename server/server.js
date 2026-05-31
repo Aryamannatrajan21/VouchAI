@@ -223,9 +223,6 @@ function parseRobustJSON(text) {
   }
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
-});
 
 // Helper: convert an array of objects into a clean markdown table string
 function toMarkdownTable(rows) {
