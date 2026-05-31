@@ -1155,11 +1155,7 @@ const distPath = path.join(__dirname, '../dist');
 app.use(express.static(distPath));
 
 // Fallback routing for SPA (Single Page Application) React routing
-app.get('/:any*', (req, res, next) => {
-  // If it's an API route, pass to error handling or let it fail naturally (don't serve index.html for APIs)
-  if (req.path.startsWith('/api')) {
-    return next();
-  }
+app.get(/^(?!\/api).*$/, (req, res, next) => {
   res.sendFile(path.join(distPath, 'index.html'), (err) => {
     if (err) {
       res.status(404).send("React build directory 'dist' not found. Ensure 'npm run build' completed successfully.");
