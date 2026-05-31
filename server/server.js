@@ -547,7 +547,8 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
         }
 
         const allHeaders = Object.keys(allRows[0]);
-        const txnRows = allRows.slice(0, 25); // Audit limit up to 25 transactions
+        const isVercel = !!process.env.VERCEL;
+        const txnRows = isVercel ? allRows.slice(0, 8) : allRows.slice(0, 25); // Audit limit: up to 8 on Vercel serverless, 25 local
 
         // 2. Download and Decrypt Supporting Documents to build PageTreeIndex
         console.log(`Building secure PageTreeIndex for ${supportFilePaths.length} supporting documents...`);
@@ -623,11 +624,21 @@ app.post('/api/create-batch', requireAuth, async (req, res) => {
 
         console.log(`PageTreeIndex fully compiled with ${pageTreeIndex.length} nodes.`);
 
+        // Start execution clock for Vercel safe timeouts
+        const startTime = Date.now();
+        const maxExecutionTimeMs = 45000; // 45 seconds safe limit
+
         // 3. Navigation & Matching Loop
         const finalVouchingResults = [];
-        const concurrencyLimit = 5;
+        const concurrencyLimit = 3; // Reduced concurrency to mitigate rate limits and cumulative delays
 
         for (let i = 0; i < txnRows.length; i += concurrencyLimit) {
+          // Early Break Guard: Check if we are approaching Vercel serverless execution limit
+          if (isVercel && (Date.now() - startTime) > maxExecutionTimeMs) {
+            console.warn(`[Vercel Safe Limit] Approaching 45s threshold. Early breakout at chunk ${i + 1}/${txnRows.length} to prevent gateway timeout.`);
+            break;
+          }
+
           const chunk = txnRows.slice(i, i + concurrencyLimit);
           console.log(`Processing parallel audit batch: transactions ${i + 1} to ${Math.min(i + concurrencyLimit, txnRows.length)}...`);
           
@@ -811,33 +822,35 @@ Return ONLY a raw JSON object matching the following structure. No markdown code
         }
 
         // 4. Save Encrypted Results to DB
-        console.log(`Writing symmetrically encrypted audit results to vouching_results table (using hybrid auditor_notes packing)...`);
-        const resultsToInsert = finalVouchingResults.map(r => {
-          const combinedNotes = {
-            notes: r.auditor_notes || '',
-            match_details: r.match_details || [],
-            evidence_files: r.evidence_files || [],
-            reference_numbers: r.reference_numbers || [],
-            original_row: r.original_row || {}
-          };
-          return {
-            batch_id: dbBatchId,
-            txn_id: encryptText(r.txn_id),
-            vendor: encryptText(r.vendor),
-            amount_dump: encryptText(r.amount_dump),
-            amount_doc: encryptText(r.amount_doc),
-            confidence: encryptText(r.confidence),
-            status: r.status, // Keep clear to enable frontend RLS filters and status counts
-            auditor_notes: encryptText(JSON.stringify(combinedNotes))
-          };
-        });
+        console.log(`Writing symmetrically encrypted audit results to vouching_results table (${finalVouchingResults.length} records completed)...`);
+        if (finalVouchingResults.length > 0) {
+          const resultsToInsert = finalVouchingResults.map(r => {
+            const combinedNotes = {
+              notes: r.auditor_notes || '',
+              match_details: r.match_details || [],
+              evidence_files: r.evidence_files || [],
+              reference_numbers: r.reference_numbers || [],
+              original_row: r.original_row || {}
+            };
+            return {
+              batch_id: dbBatchId,
+              txn_id: encryptText(r.txn_id),
+              vendor: encryptText(r.vendor),
+              amount_dump: encryptText(r.amount_dump),
+              amount_doc: encryptText(r.amount_doc),
+              confidence: encryptText(r.confidence),
+              status: r.status, // Keep clear to enable frontend RLS filters and status counts
+              auditor_notes: encryptText(JSON.stringify(combinedNotes))
+            };
+          });
 
-        const { error: insertError } = await supabase.from('vouching_results').insert(resultsToInsert);
-        if (insertError) throw insertError;
+          const { error: insertError } = await supabase.from('vouching_results').insert(resultsToInsert);
+          if (insertError) throw insertError;
+        }
 
         await supabase.from('batches').update({ status: 'completed' }).eq('id', dbBatchId);
         
-        console.log(`Secure batch ${dbBatchId} completed successfully using PageIndex RAG!`);
+        console.log(`Secure batch ${dbBatchId} completed successfully (completed ${finalVouchingResults.length}/${txnRows.length} rows)!`);
       } catch (err) {
         console.error(`Error processing batch ${dbBatchId}:`, err);
         try {
